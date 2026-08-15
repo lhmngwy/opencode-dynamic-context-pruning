@@ -3,6 +3,7 @@ import { ensureSessionInitialized, refreshManualMode } from "../state"
 import { saveSessionState } from "../state/persistence"
 import { assignMessageRefs } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
+import { compressPermission } from "../compress-permission"
 import { deduplicate, purgeErrors } from "../strategies"
 import { getCurrentParams, getCurrentTokenUsage } from "../token-utils"
 import { sendCompressNotification } from "../ui/notification"
@@ -62,18 +63,23 @@ export async function prepareSession(
         )
     }
 
-    await runAbortable(
-        () =>
-            toolCtx.ask({
-                permission: "compress",
-                patterns: ["*"],
-                always: ["*"],
-                metadata: {},
-            }),
-        signal,
-        "Compression permission",
-        ctx.config.compress.permission === "ask" ? undefined : COMPRESSION_API_TIMEOUT_MS,
-    ).catch((error) => failCompression(ctx, error))
+    const permission = compressPermission(ctx.state, ctx.config)
+    if (permission === "deny") {
+        failCompression(ctx, new Error("Compression permission denied."))
+    }
+    if (permission === "ask") {
+        await runAbortable(
+            () =>
+                toolCtx.ask({
+                    permission: "compress",
+                    patterns: ["*"],
+                    always: ["*"],
+                    metadata: {},
+                }),
+            signal,
+            "Compression permission",
+        ).catch((error) => failCompression(ctx, error))
+    }
 
     toolCtx.metadata({ title })
 

@@ -17,7 +17,7 @@ test("runAbortable rejects a stalled operation on timeout", async () => {
     )
 })
 
-test("prepareSession stops waiting for a stalled permission request when cancelled", async () => {
+test("prepareSession stops waiting for an explicitly requested permission when cancelled", async () => {
     const controller = new AbortController()
     const state = createSessionState()
     state.manualMode = "compress-pending"
@@ -29,7 +29,7 @@ test("prepareSession stops waiting for a stalled permission request when cancell
             logger: new Logger(false),
             config: {
                 manualMode: { enabled: true },
-                compress: { permission: "allow" },
+                compress: { permission: "ask" },
             },
         } as any,
         {
@@ -45,6 +45,41 @@ test("prepareSession stops waiting for a stalled permission request when cancell
     controller.abort()
     await rejection
     assert.equal(state.manualMode, "active")
+})
+
+test("prepareSession does not re-enter the host permission API when compression is allowed", async () => {
+    const sessionID = "ses-allowed-compression"
+    const state = createSessionState()
+    state.sessionId = sessionID
+    let permissionRequests = 0
+
+    await prepareSession(
+        {
+            client: {},
+            state,
+            logger: new Logger(false),
+            config: {
+                manualMode: { enabled: false, automaticStrategies: true },
+                compress: { permission: "allow" },
+                strategies: {
+                    deduplication: { enabled: false },
+                    purgeErrors: { enabled: false },
+                },
+            },
+            messageCache: new Map([[sessionID, []]]),
+        } as any,
+        {
+            ask: async () => {
+                permissionRequests += 1
+                return new Promise<void>(() => {})
+            },
+            metadata: () => {},
+            sessionID,
+        },
+        "Allowed compression",
+    )
+
+    assert.equal(permissionRequests, 0)
 })
 
 test("prepareSession passes cancellation to a stalled session message request", async () => {

@@ -17,6 +17,7 @@ import {
     saveSessionState,
     type WithParts,
 } from "../lib/state"
+import { resolveEffectiveCompressPermission } from "../lib/host-permissions"
 
 function buildConfig(permission: "allow" | "ask" | "deny" = "allow"): PluginConfig {
     return {
@@ -88,6 +89,31 @@ function buildMessage(id: string, role: "user" | "assistant", text: string): Wit
         ],
     }
 }
+
+test("effective compression permission preserves explicit host ask policies", () => {
+    assert.equal(
+        resolveEffectiveCompressPermission(
+            "allow",
+            {
+                global: { compress: "ask" },
+                agents: {},
+            },
+            "assistant",
+        ),
+        "ask",
+    )
+    assert.equal(
+        resolveEffectiveCompressPermission(
+            "allow",
+            {
+                global: { compress: "allow" },
+                agents: { assistant: { compress: "deny" } },
+            },
+            "assistant",
+        ),
+        "deny",
+    )
+})
 
 test("system prompt handler caches full model context for percentage thresholds", async () => {
     const state = createSessionState()

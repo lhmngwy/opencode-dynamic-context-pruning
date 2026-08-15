@@ -81,16 +81,15 @@ export const resolveEffectiveCompressPermission = (
     hostPermissions: HostPermissionSnapshot,
     agentName?: string,
 ): PermissionAction => {
-    if (basePermission === "deny") {
-        return "deny"
-    }
-
-    return compressDisabledByOpencode(
-        hostPermissions.global,
-        agentName ? hostPermissions.agents[agentName] : undefined,
+    const match = findLastMatchingRule(
+        getPermissionRules([
+            hostPermissions.global,
+            agentName ? hostPermissions.agents[agentName] : undefined,
+        ]),
+        (rule) => wildcardMatch("compress", rule.permission) && wildcardMatch("*", rule.pattern),
     )
-        ? "deny"
-        : basePermission
+
+    return match?.action ?? basePermission
 }
 
 export const hasExplicitToolPermission = (

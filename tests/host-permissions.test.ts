@@ -52,6 +52,22 @@ test("agent explicit allow overrides global wildcard deny", () => {
     )
 })
 
+test("agent explicit allow overrides a host deny already reflected in the base config", () => {
+    assert.equal(
+        resolveEffectiveCompressPermission(
+            "deny",
+            {
+                global: { "*": "deny", compress: "deny" },
+                agents: {
+                    build: { compress: "allow" },
+                },
+            },
+            "build",
+        ),
+        "allow",
+    )
+})
+
 test("permission wildcards follow opencode-style matching", () => {
     assert.equal(compressDisabledByOpencode({ "c?mpress": "deny" }), true)
 })
