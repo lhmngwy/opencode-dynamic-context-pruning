@@ -6,6 +6,8 @@ const anthropicCountTokens = (_anthropicTokenizer.countTokens ??
     (_anthropicTokenizer as any).default?.countTokens) as typeof _anthropicTokenizer.countTokens
 import { getLastUserMessage } from "./messages/query"
 
+const MAX_EXACT_TOKENIZER_CHARS = 4_000
+
 export function getCurrentTokenUsage(state: SessionState, messages: WithParts[]): number {
     for (let i = messages.length - 1; i >= 0; i--) {
         const msg = messages[i]
@@ -68,6 +70,9 @@ export function getCurrentParams(
 
 export function countTokens(text: string): number {
     if (!text) return 0
+    if (text.length > MAX_EXACT_TOKENIZER_CHARS) {
+        return Math.round(text.length / 4)
+    }
     try {
         return anthropicCountTokens(text)
     } catch {
@@ -76,8 +81,13 @@ export function countTokens(text: string): number {
 }
 
 export function estimateTokensBatch(texts: string[]): number {
-    if (texts.length === 0) return 0
-    return countTokens(texts.join(" "))
+    const nonEmptyTexts = texts.filter((text) => typeof text === "string" && text.length > 0)
+    if (nonEmptyTexts.length === 0) return 0
+    const totalChars = nonEmptyTexts.reduce(
+        (total, text) => total + text.length,
+        nonEmptyTexts.length - 1,
+    )
+    return Math.max(1, Math.round(totalChars / 4))
 }
 
 export const COMPACTED_TOOL_OUTPUT_PLACEHOLDER = "[Old tool result content cleared]"
@@ -150,15 +160,33 @@ export function countMessageTextTokens(msg: WithParts): number {
 }
 
 export function countAllMessageTokens(msg: WithParts): number {
+    return estimateTokensBatch(extractMessageTokenContent(msg))
+}
+
+export function countAllMessageTokensBatch(messages: WithParts[]): Map<string, number> {
+    const result = new Map<string, number>()
+
+    for (const message of messages) {
+        const messageId = message.info.id
+        if (result.has(messageId)) {
+            continue
+        }
+
+        result.set(messageId, countAllMessageTokens(message))
+    }
+
+    return result
+}
+
+function extractMessageTokenContent(msg: WithParts): string[] {
     const parts = Array.isArray(msg.parts) ? msg.parts : []
     const texts: string[] = []
     for (const part of parts) {
-        if (part.type === "text") {
+        if (part.type === "text" && typeof part.text === "string") {
             texts.push(part.text)
         } else {
             texts.push(...extractToolContent(part))
         }
     }
-    if (texts.length === 0) return 0
-    return estimateTokensBatch(texts)
+    return texts
 }

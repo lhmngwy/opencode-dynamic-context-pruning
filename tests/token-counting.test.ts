@@ -4,6 +4,8 @@ import type { WithParts } from "../lib/state"
 import {
     COMPACTED_TOOL_OUTPUT_PLACEHOLDER,
     countAllMessageTokens,
+    countAllMessageTokensBatch,
+    countTokens,
     countToolTokens,
     estimateTokensBatch,
     extractCompletedToolOutput,
@@ -171,4 +173,56 @@ test("counting uses the compacted tool placeholder for completed outputs", () =>
 
     assert.equal(extractCompletedToolOutput(part), COMPACTED_TOOL_OUTPUT_PLACEHOLDER)
     assertCounted(part, [JSON.stringify(input), COMPACTED_TOOL_OUTPUT_PLACEHOLDER])
+})
+
+test("batch message counting preserves the aggregate token count", () => {
+    const first = buildToolMessage(
+        buildToolPart("read", {
+            status: "completed",
+            input: { filePath: "/tmp/first.txt" },
+            output: "first output",
+        }),
+    )
+    const second = buildToolMessage(
+        buildToolPart("grep", {
+            status: "error",
+            input: { pattern: "TODO" },
+            error: "second error",
+        }),
+    )
+    second.info.id = "msg-tool-2"
+    const empty = buildToolMessage({ type: "step-start" })
+    empty.info.id = "msg-empty"
+
+    const counts = countAllMessageTokensBatch([first, second, empty])
+    const combinedContents = [
+        ...extractToolContent(first.parts[0]),
+        ...extractToolContent(second.parts[0]),
+    ]
+
+    assert.equal(counts.size, 3)
+    assert.equal(counts.get("msg-empty"), 0)
+    assert.equal(counts.get(first.info.id), countAllMessageTokens(first))
+    assert.equal(counts.get(second.info.id), countAllMessageTokens(second))
+    assert.equal(
+        [...counts.values()].reduce((total, count) => total + count, 0),
+        countAllMessageTokens(first) + countAllMessageTokens(second),
+    )
+    assert.equal(
+        countAllMessageTokens(first) + countAllMessageTokens(second),
+        estimateTokensBatch(combinedContents),
+    )
+})
+
+test("large token counts use a bounded estimate", () => {
+    const text = "x".repeat(25_000)
+    assert.equal(countTokens(text), Math.round(text.length / 4))
+})
+
+test("estimates count short content and ignore malformed text parts", () => {
+    assert.equal(estimateTokensBatch(["x"]), 1)
+    assert.equal(estimateTokensBatch(["", ""]), 0)
+
+    const malformed = buildToolMessage({ type: "text", text: null })
+    assert.equal(countAllMessageTokens(malformed), 0)
 })

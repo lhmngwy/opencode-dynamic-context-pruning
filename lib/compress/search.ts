@@ -2,7 +2,7 @@ import type { SessionState, WithParts } from "../state"
 import { formatBlockRef, parseBoundaryId } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
 import { filterMessages } from "../messages/shape"
-import { countAllMessageTokens } from "../token-utils"
+import { countAllMessageTokensBatch } from "../token-utils"
 import type { BoundaryReference, SearchContext, SelectionResolution } from "./types"
 
 export async function fetchSessionMessages(
@@ -124,7 +124,7 @@ export function resolveSelection(
     const toolSeen = new Set<string>()
     const requiredBlockIds: number[] = []
     const requiredBlockSeen = new Set<number>()
-    const messageTokenById = new Map<string, number>()
+    const selectedMessages: WithParts[] = []
 
     for (let index = startRawIndex; index <= endRawIndex; index++) {
         const rawMessage = context.rawMessages[index]
@@ -139,10 +139,7 @@ export function resolveSelection(
         if (!messageSeen.has(messageId)) {
             messageSeen.add(messageId)
             messageIds.push(messageId)
-        }
-
-        if (!messageTokenById.has(messageId)) {
-            messageTokenById.set(messageId, countAllMessageTokens(rawMessage))
+            selectedMessages.push(rawMessage)
         }
 
         const parts = Array.isArray(rawMessage.parts) ? rawMessage.parts : []
@@ -195,7 +192,7 @@ export function resolveSelection(
         startReference,
         endReference,
         messageIds,
-        messageTokenById,
+        messageTokenById: countAllMessageTokensBatch(selectedMessages),
         toolIds,
         requiredBlockIds,
     }
