@@ -191,9 +191,7 @@ export async function sendCompressNotification(
     }
 
     if (config.pruneNotificationType === "chat") {
-        const message = buildCompressChatNotification(state, entries, contextTokensBefore)
-        await sendIgnoredMessage(client, sessionId, message, params, logger, signal)
-        return true
+        return false
     }
 
     let message: string
@@ -314,40 +312,6 @@ export async function sendCompressNotification(
     return true
 }
 
-export function buildCompressChatNotification(
-    state: SessionState,
-    entries: CompressionNotificationEntry[],
-    contextTokensBefore: number,
-): string {
-    const blockIds = new Set(entries.map((entry) => entry.blockId))
-    const consumedBlockIds = new Set<number>()
-    let compressedTokens = 0
-    let summaryTokens = 0
-
-    for (const blockId of blockIds) {
-        const block = state.prune.messages.blocksById.get(blockId)
-        if (!block) {
-            continue
-        }
-        compressedTokens += block.compressedTokens
-        summaryTokens += block.summaryTokens
-        for (const consumedBlockId of block.consumedBlockIds) {
-            consumedBlockIds.add(consumedBlockId)
-        }
-    }
-
-    let replacedSummaryTokens = 0
-    for (const blockId of consumedBlockIds) {
-        replacedSummaryTokens += state.prune.messages.blocksById.get(blockId)?.summaryTokens ?? 0
-    }
-
-    const contextTokensAfter = Math.max(
-        0,
-        contextTokensBefore - compressedTokens - replacedSummaryTokens + summaryTokens,
-    )
-    return `DCP context: ${formatTokenCount(contextTokensBefore, true)} -> ${formatTokenCount(contextTokensAfter, true)} tokens`
-}
-
 export async function sendIgnoredMessage(
     client: any,
     sessionID: string,
@@ -355,7 +319,6 @@ export async function sendIgnoredMessage(
     params: any,
     logger: Logger,
     signal?: AbortSignal,
-    throwOnError = false,
 ): Promise<void> {
     const agent = params.agent || undefined
     const variant = params.variant || undefined
@@ -389,8 +352,5 @@ export async function sendIgnoredMessage(
         })
     } catch (error: any) {
         logger.error("Failed to send notification", { error: error.message })
-        if (throwOnError) {
-            throw error
-        }
     }
 }

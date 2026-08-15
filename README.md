@@ -97,7 +97,8 @@ Each level overrides the previous, so project settings take priority over global
     "debug": false,
     // Notification display: "off", "minimal", or "detailed"
     "pruneNotification": "detailed",
-    // Notification type: "chat" (in-conversation) or "toast" (system toast)
+    // Notification type: "chat" (tool-pruning messages only) or "toast".
+    // Compression notifications are omitted in chat mode.
     "pruneNotificationType": "chat",
     // Slash commands configuration
     "commands": {
@@ -136,7 +137,7 @@ Each level overrides the previous, so project settings take priority over global
         "mode": "range",
         // Permission mode: "allow" (no prompt), "ask" (prompt), "deny" (tool not registered)
         "permission": "allow",
-        // Show compression content in a chat notification
+        // Show compression content in a toast notification
         "showCompression": false,
         // Let active summary tokens extend the effective maxContextLimit
         "summaryBuffer": true,

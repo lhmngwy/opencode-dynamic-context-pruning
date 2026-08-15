@@ -35,7 +35,7 @@
             "type": "string",
             "enum": ["chat", "toast"],
             "default": "chat",
-            "description": "Where to display notifications (chat message or toast notification)"
+            "description": "Where to display notifications. Compression notifications are omitted in chat mode."
         },
         "commands": {
             "type": "object",

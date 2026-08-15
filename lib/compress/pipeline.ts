@@ -5,7 +5,7 @@ import { assignMessageRefs } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
 import { deduplicate, purgeErrors } from "../strategies"
 import { getCurrentParams, getCurrentTokenUsage } from "../token-utils"
-import { buildCompressChatNotification, sendCompressNotification } from "../ui/notification"
+import { sendCompressNotification } from "../ui/notification"
 import type { ToolContext } from "./types"
 import { buildSearchContext, fetchSessionMessages } from "./search"
 import type { SearchContext } from "./types"
@@ -138,24 +138,15 @@ export async function finalizeSession(
     applyPendingCompressionDurations(ctx.state)
     await saveSessionState(ctx.state, ctx.logger)
 
+    if (ctx.config.pruneNotificationType === "chat") {
+        return
+    }
+
     const params = getCurrentParams(ctx.state, rawMessages, ctx.logger)
     const contextTokensBefore = getCurrentTokenUsage(ctx.state, rawMessages)
     const sessionMessageIds = rawMessages
         .filter((msg) => !isIgnoredUserMessage(msg))
         .map((msg) => msg.info.id)
-
-    if (ctx.config.pruneNotificationType === "chat") {
-        if (ctx.config.pruneNotification !== "off" && entries.length > 0) {
-            const pending = ctx.notificationQueue?.get(toolCtx.sessionID) ?? []
-            pending.push({
-                sessionId: toolCtx.sessionID,
-                text: buildCompressChatNotification(ctx.state, entries, contextTokensBefore),
-                params,
-            })
-            ctx.notificationQueue?.set(toolCtx.sessionID, pending)
-        }
-        return
-    }
 
     try {
         const signal = toolCtx.abort ?? new AbortController().signal
