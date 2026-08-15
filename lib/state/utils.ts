@@ -51,11 +51,18 @@ export function serializePruneMessagesState(
     }
 }
 
-export async function isSubAgentSession(client: any, sessionID: string): Promise<boolean> {
+export async function isSubAgentSession(
+    client: any,
+    sessionID: string,
+    signal?: AbortSignal,
+): Promise<boolean> {
     try {
-        const result = await client.session.get({ path: { id: sessionID } })
+        const result = await client.session.get({ path: { id: sessionID }, signal })
         return !!result.data?.parentID
     } catch (error: any) {
+        if (signal?.aborted) {
+            throw signal.reason instanceof Error ? signal.reason : error
+        }
         return false
     }
 }

@@ -10,6 +10,11 @@ import type { ToolContext } from "./types"
 import { buildSearchContext, fetchSessionMessages } from "./search"
 import type { SearchContext } from "./types"
 import { applyPendingCompressionDurations } from "./timing"
+import {
+    COMPRESSION_API_TIMEOUT_MS,
+    COMPRESSION_NOTIFICATION_TIMEOUT_MS,
+    runAbortable,
+} from "./abort"
 
 interface RunContext {
     ask(input: {
@@ -20,6 +25,7 @@ interface RunContext {
     }): Promise<void>
     metadata(input: { title: string }): void
     sessionID: string
+    abort?: AbortSignal
 }
 
 export interface NotificationEntry {
@@ -32,6 +38,14 @@ export interface NotificationEntry {
 export interface PreparedSession {
     rawMessages: WithParts[]
     searchContext: SearchContext
+    signal: AbortSignal
+}
+
+export function failCompression(ctx: ToolContext, error: unknown): never {
+    if (ctx.state.manualMode === "compress-pending") {
+        ctx.state.manualMode = "active"
+    }
+    throw error
 }
 
 export async function prepareSession(
@@ -39,6 +53,7 @@ export async function prepareSession(
     toolCtx: RunContext,
     title: string,
 ): Promise<PreparedSession> {
+    const signal = toolCtx.abort ?? new AbortController().signal
     await refreshManualMode(ctx.state, toolCtx.sessionID, ctx.logger, ctx.config.manualMode.enabled)
 
     if (ctx.state.manualMode && ctx.state.manualMode !== "compress-pending") {
@@ -47,25 +62,43 @@ export async function prepareSession(
         )
     }
 
-    await toolCtx.ask({
-        permission: "compress",
-        patterns: ["*"],
-        always: ["*"],
-        metadata: {},
-    })
+    await runAbortable(
+        () =>
+            toolCtx.ask({
+                permission: "compress",
+                patterns: ["*"],
+                always: ["*"],
+                metadata: {},
+            }),
+        signal,
+        "Compression permission",
+        ctx.config.compress.permission === "ask" ? undefined : COMPRESSION_API_TIMEOUT_MS,
+    ).catch((error) => failCompression(ctx, error))
 
     toolCtx.metadata({ title })
 
-    const rawMessages = await fetchSessionMessages(ctx.client, toolCtx.sessionID)
+    const rawMessages = await runAbortable(
+        (requestSignal) => fetchSessionMessages(ctx.client, toolCtx.sessionID, requestSignal),
+        signal,
+        "Loading session messages for compression",
+        COMPRESSION_API_TIMEOUT_MS,
+    ).catch((error) => failCompression(ctx, error))
 
-    await ensureSessionInitialized(
-        ctx.client,
-        ctx.state,
-        toolCtx.sessionID,
-        ctx.logger,
-        rawMessages,
-        ctx.config.manualMode.enabled,
-    )
+    await runAbortable(
+        (requestSignal) =>
+            ensureSessionInitialized(
+                ctx.client,
+                ctx.state,
+                toolCtx.sessionID,
+                ctx.logger,
+                rawMessages,
+                ctx.config.manualMode.enabled,
+                requestSignal,
+            ),
+        signal,
+        "Initializing compression session",
+        COMPRESSION_API_TIMEOUT_MS,
+    ).catch((error) => failCompression(ctx, error))
 
     assignMessageRefs(ctx.state, rawMessages)
 
@@ -75,6 +108,7 @@ export async function prepareSession(
     return {
         rawMessages,
         searchContext: buildSearchContext(ctx.state, rawMessages),
+        signal,
     }
 }
 
@@ -90,19 +124,36 @@ export async function finalizeSession(
     await saveSessionState(ctx.state, ctx.logger)
 
     const params = getCurrentParams(ctx.state, rawMessages, ctx.logger)
+    const contextTokensBefore = getCurrentTokenUsage(ctx.state, rawMessages)
     const sessionMessageIds = rawMessages
         .filter((msg) => !isIgnoredUserMessage(msg))
         .map((msg) => msg.info.id)
 
-    await sendCompressNotification(
-        ctx.client,
-        ctx.logger,
-        ctx.config,
-        ctx.state,
-        toolCtx.sessionID,
-        entries,
-        batchTopic,
-        sessionMessageIds,
-        params,
-    )
+    try {
+        const signal = toolCtx.abort ?? new AbortController().signal
+        await runAbortable(
+            (requestSignal) =>
+                sendCompressNotification(
+                    ctx.client,
+                    ctx.logger,
+                    ctx.config,
+                    ctx.state,
+                    toolCtx.sessionID,
+                    entries,
+                    batchTopic,
+                    sessionMessageIds,
+                    params,
+                    contextTokensBefore,
+                    requestSignal,
+                ),
+            signal,
+            "Sending compression notification",
+            COMPRESSION_NOTIFICATION_TIMEOUT_MS,
+        )
+    } catch (error: any) {
+        ctx.logger.warn("Failed to send compression notification", {
+            sessionId: toolCtx.sessionID,
+            error: error?.message,
+        })
+    }
 }

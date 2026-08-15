@@ -2,7 +2,12 @@ import { tool } from "@opencode-ai/plugin"
 import type { ToolContext } from "./types"
 import { countTokens } from "../token-utils"
 import { RANGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
-import { finalizeSession, prepareSession, type NotificationEntry } from "./pipeline"
+import {
+    failCompression,
+    finalizeSession,
+    prepareSession,
+    type NotificationEntry,
+} from "./pipeline"
 import {
     appendProtectedPromptInfo,
     appendProtectedTools,
@@ -25,6 +30,7 @@ import {
     wrapCompressedSummary,
 } from "./state"
 import type { CompressRangeToolArgs } from "./types"
+import { COMPRESSION_API_TIMEOUT_MS, runAbortable } from "./abort"
 
 function buildSchema() {
     return {
@@ -68,7 +74,7 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                     ? (toolCtx as unknown as { callID: string }).callID
                     : undefined
 
-            const { rawMessages, searchContext } = await prepareSession(
+            const { rawMessages, searchContext, signal } = await prepareSession(
                 ctx,
                 toolCtx,
                 `Compress Range: ${input.topic}`,
@@ -120,16 +126,23 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                     ctx.config.compress.protectTags,
                 )
 
-                const summaryWithTools = await appendProtectedTools(
-                    ctx.client,
-                    ctx.state,
-                    ctx.config.experimental.allowSubAgents,
-                    summaryWithPromptInfo,
-                    plan.selection,
-                    searchContext,
-                    ctx.config.compress.protectedTools,
-                    ctx.config.protectedFilePatterns,
-                )
+                const summaryWithTools = await runAbortable(
+                    (requestSignal) =>
+                        appendProtectedTools(
+                            ctx.client,
+                            ctx.state,
+                            ctx.config.experimental.allowSubAgents,
+                            summaryWithPromptInfo,
+                            plan.selection,
+                            searchContext,
+                            ctx.config.compress.protectedTools,
+                            ctx.config.protectedFilePatterns,
+                            requestSignal,
+                        ),
+                    signal,
+                    "Loading protected compression content",
+                    COMPRESSION_API_TIMEOUT_MS,
+                ).catch((error) => failCompression(ctx, error))
 
                 const completedSummary = appendMissingBlockSummaries(
                     summaryWithTools,

@@ -116,6 +116,7 @@ export async function appendProtectedTools(
     searchContext: SearchContext,
     protectedTools: string[],
     protectedFilePatterns: string[] = [],
+    signal?: AbortSignal,
 ): Promise<string> {
     const protectedOutputs: string[] = []
 
@@ -174,6 +175,7 @@ export async function appendProtectedTools(
                                     const subAgentMessages = await fetchSessionMessages(
                                         client,
                                         subAgentSessionId,
+                                        signal,
                                     )
                                     subAgentResultText = buildSubagentResultText(subAgentMessages)
                                 } catch {

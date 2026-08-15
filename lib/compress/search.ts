@@ -5,9 +5,14 @@ import { filterMessages } from "../messages/shape"
 import { countAllMessageTokens } from "../token-utils"
 import type { BoundaryReference, SearchContext, SelectionResolution } from "./types"
 
-export async function fetchSessionMessages(client: any, sessionId: string): Promise<WithParts[]> {
+export async function fetchSessionMessages(
+    client: any,
+    sessionId: string,
+    signal?: AbortSignal,
+): Promise<WithParts[]> {
     const response = await client.session.messages({
         path: { id: sessionId },
+        signal,
     })
 
     return filterMessages(response?.data || response)

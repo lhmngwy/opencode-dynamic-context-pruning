@@ -3,7 +3,12 @@ import type { ToolContext } from "./types"
 import { countTokens } from "../token-utils"
 import { MESSAGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
 import { formatIssues, formatResult, resolveMessages, validateArgs } from "./message-utils"
-import { finalizeSession, prepareSession, type NotificationEntry } from "./pipeline"
+import {
+    failCompression,
+    finalizeSession,
+    prepareSession,
+    type NotificationEntry,
+} from "./pipeline"
 import { appendProtectedPromptInfo, appendProtectedTools } from "./protected-content"
 import {
     allocateBlockId,
@@ -12,6 +17,7 @@ import {
     wrapCompressedSummary,
 } from "./state"
 import type { CompressMessageToolArgs } from "./types"
+import { COMPRESSION_API_TIMEOUT_MS, runAbortable } from "./abort"
 
 function buildSchema() {
     return {
@@ -53,7 +59,7 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                     ? (toolCtx as unknown as { callID: string }).callID
                     : undefined
 
-            const { rawMessages, searchContext } = await prepareSession(
+            const { rawMessages, searchContext, signal } = await prepareSession(
                 ctx,
                 toolCtx,
                 `Compress Message: ${input.topic}`,
@@ -85,16 +91,23 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                     ctx.config.compress.protectTags,
                 )
 
-                const summaryWithTools = await appendProtectedTools(
-                    ctx.client,
-                    ctx.state,
-                    ctx.config.experimental.allowSubAgents,
-                    summaryWithPromptInfo,
-                    plan.selection,
-                    searchContext,
-                    ctx.config.compress.protectedTools,
-                    ctx.config.protectedFilePatterns,
-                )
+                const summaryWithTools = await runAbortable(
+                    (requestSignal) =>
+                        appendProtectedTools(
+                            ctx.client,
+                            ctx.state,
+                            ctx.config.experimental.allowSubAgents,
+                            summaryWithPromptInfo,
+                            plan.selection,
+                            searchContext,
+                            ctx.config.compress.protectedTools,
+                            ctx.config.protectedFilePatterns,
+                            requestSignal,
+                        ),
+                    signal,
+                    "Loading protected compression content",
+                    COMPRESSION_API_TIMEOUT_MS,
+                ).catch((error) => failCompression(ctx, error))
 
                 preparedPlans.push({
                     plan,

@@ -7,6 +7,7 @@ import { createCompressMessageTool } from "../lib/compress/message"
 import { createSessionState, type WithParts } from "../lib/state"
 import type { PluginConfig } from "../lib/config"
 import { Logger } from "../lib/logger"
+import { formatTokenCount } from "../lib/ui/utils"
 
 const testDataHome = join(tmpdir(), `opencode-dcp-message-tests-${process.pid}`)
 const testConfigHome = join(tmpdir(), `opencode-dcp-message-config-tests-${process.pid}`)
@@ -697,6 +698,73 @@ test("compress message mode sends one aggregated notification for batched messag
     assert.match(toastCalls[0] || "", /▣ Compression #1 -[^,\n]+ removed, \+[^\s\n]+ summary/)
     assert.match(toastCalls[0] || "", /Topic: Batch stale notes/)
     assert.match(toastCalls[0] || "", /Items: 2 messages/)
+})
+
+test("compress message mode sends compact context usage in chat notifications", async () => {
+    const sessionID = `ses_message_compress_chat_notify_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const lastAssistant = rawMessages.at(-1)
+    if (lastAssistant) {
+        const assistantInfo = lastAssistant.info as any
+        assistantInfo.tokens = {
+            input: 12_000,
+            output: 1_000,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+        }
+    }
+
+    const state = createSessionState()
+    const config = buildConfig()
+    config.pruneNotification = "detailed"
+    config.pruneNotificationType = "chat"
+    const chatMessages: string[] = []
+
+    const tool = createCompressMessageTool({
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => ({ data: { parentID: null } }),
+                prompt: async ({ body }: { body: { parts: Array<{ text: string }> } }) => {
+                    chatMessages.push(body.parts[0]?.text || "")
+                },
+            },
+        },
+        state,
+        logger: new Logger(false),
+        config,
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await tool.execute(
+        {
+            topic: "Compact notification",
+            content: [
+                {
+                    messageId: "m0002",
+                    topic: "Code path note",
+                    summary: "Captured the assistant's code-path findings.",
+                },
+            ],
+        },
+        {
+            ask: async () => {},
+            metadata: () => {},
+            sessionID,
+            messageID: "msg-compress-message-chat-notify",
+        },
+    )
+
+    const block = Array.from(state.prune.messages.blocksById.values())[0]
+    const expectedAfter = 13_000 - (block?.compressedTokens ?? 0) + (block?.summaryTokens ?? 0)
+    assert.deepEqual(chatMessages, [
+        `DCP context: 13K -> ${formatTokenCount(expectedAfter, true)} tokens`,
+    ])
 })
 
 test("compress message mode skips messages that are already actively compressed", async () => {

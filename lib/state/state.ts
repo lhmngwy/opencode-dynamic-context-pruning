@@ -142,6 +142,7 @@ export async function ensureSessionInitialized(
     logger: Logger,
     messages: WithParts[],
     manualModeEnabled: boolean,
+    signal?: AbortSignal,
 ): Promise<void> {
     if (state.sessionId === sessionId) {
         return
@@ -150,11 +151,11 @@ export async function ensureSessionInitialized(
     // logger.info("session ID = " + sessionId)
     // logger.info("Initializing session state", { sessionId: sessionId })
 
+    const isSubAgent = await isSubAgentSession(client, sessionId, signal)
+
     resetSessionState(state)
     state.manualMode = manualModeEnabled ? "active" : false
     state.sessionId = sessionId
-
-    const isSubAgent = await isSubAgentSession(client, sessionId)
     state.isSubAgent = isSubAgent
     // logger.info("isSubAgent = " + isSubAgent)
 

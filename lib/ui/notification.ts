@@ -179,6 +179,8 @@ export async function sendCompressNotification(
     batchTopic: string | undefined,
     sessionMessageIds: string[],
     params: any,
+    contextTokensBefore: number,
+    signal?: AbortSignal,
 ): Promise<boolean> {
     if (config.pruneNotification === "off") {
         return false
@@ -186,6 +188,39 @@ export async function sendCompressNotification(
 
     if (entries.length === 0) {
         return false
+    }
+
+    if (config.pruneNotificationType === "chat") {
+        const blockIds = new Set(entries.map((entry) => entry.blockId))
+        const consumedBlockIds = new Set<number>()
+        let compressedTokens = 0
+        let summaryTokens = 0
+
+        for (const blockId of blockIds) {
+            const block = state.prune.messages.blocksById.get(blockId)
+            if (!block) {
+                continue
+            }
+            compressedTokens += block.compressedTokens
+            summaryTokens += block.summaryTokens
+            for (const consumedBlockId of block.consumedBlockIds) {
+                consumedBlockIds.add(consumedBlockId)
+            }
+        }
+
+        let replacedSummaryTokens = 0
+        for (const blockId of consumedBlockIds) {
+            replacedSummaryTokens +=
+                state.prune.messages.blocksById.get(blockId)?.summaryTokens ?? 0
+        }
+
+        const contextTokensAfter = Math.max(
+            0,
+            contextTokensBefore - compressedTokens - replacedSummaryTokens + summaryTokens,
+        )
+        const message = `DCP context: ${formatTokenCount(contextTokensBefore, true)} -> ${formatTokenCount(contextTokensAfter, true)} tokens`
+        await sendIgnoredMessage(client, sessionId, message, params, logger, signal)
+        return true
     }
 
     let message: string
@@ -291,6 +326,7 @@ export async function sendCompressNotification(
             config.pruneNotification === "minimal" ? toastMessage : truncateToastBody(toastMessage)
 
         await client.tui.showToast({
+            signal,
             body: {
                 title: "DCP: Compress Notification",
                 message: toastMessage,
@@ -301,7 +337,7 @@ export async function sendCompressNotification(
         return true
     }
 
-    await sendIgnoredMessage(client, sessionId, message, params, logger)
+    await sendIgnoredMessage(client, sessionId, message, params, logger, signal)
     return true
 }
 
@@ -311,6 +347,7 @@ export async function sendIgnoredMessage(
     text: string,
     params: any,
     logger: Logger,
+    signal?: AbortSignal,
 ): Promise<void> {
     const agent = params.agent || undefined
     const variant = params.variant || undefined
@@ -324,6 +361,7 @@ export async function sendIgnoredMessage(
 
     try {
         await client.session.prompt({
+            signal,
             path: {
                 id: sessionID,
             },
