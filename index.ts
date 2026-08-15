@@ -18,6 +18,8 @@ import {
 } from "./lib/hooks"
 import { configureClientAuth, isSecureMode } from "./lib/auth"
 import { startAutoUpdate } from "./lib/update"
+import type { WithParts } from "./lib/state"
+import type { CompressionNotificationQueue } from "./lib/compress/types"
 
 const server: Plugin = (async (ctx) => {
     const config = getConfig(ctx)
@@ -33,6 +35,8 @@ const server: Plugin = (async (ctx) => {
         global: undefined,
         agents: {},
     }
+    const messageCache = new Map<string, WithParts[]>()
+    const notificationQueue: CompressionNotificationQueue = new Map()
 
     if (isSecureMode()) {
         configureClientAuth(ctx.client)
@@ -51,6 +55,8 @@ const server: Plugin = (async (ctx) => {
         logger,
         config,
         prompts,
+        messageCache,
+        notificationQueue,
     }
 
     return {
@@ -67,6 +73,7 @@ const server: Plugin = (async (ctx) => {
             config,
             prompts,
             hostPermissions,
+            messageCache,
         ) as any,
         "experimental.text.complete": createTextCompleteHandler(),
         "command.execute.before": createCommandExecuteHandler(
@@ -77,7 +84,7 @@ const server: Plugin = (async (ctx) => {
             ctx.directory,
             hostPermissions,
         ),
-        event: createEventHandler(state, logger),
+        event: createEventHandler(state, logger, ctx.client, notificationQueue, messageCache),
         tool: {
             ...(config.compress.permission !== "deny" && {
                 compress:

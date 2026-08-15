@@ -37,6 +37,9 @@ import {
 import { type HostPermissionSnapshot } from "./host-permissions"
 import { compressPermission, syncCompressPermissionState } from "./compress-permission"
 import { checkSession, ensureSessionInitialized, saveSessionState, syncToolCache } from "./state"
+import type { CompressionNotificationQueue } from "./compress/types"
+import { COMPRESSION_NOTIFICATION_TIMEOUT_MS, runAbortable } from "./compress/abort"
+import { sendIgnoredMessage } from "./ui/notification"
 import { cacheSystemPromptTokens } from "./ui/utils"
 
 const INTERNAL_AGENT_SIGNATURES = [
@@ -103,6 +106,7 @@ export function createChatMessageTransformHandler(
     config: PluginConfig,
     prompts: PromptStore,
     hostPermissions: HostPermissionSnapshot,
+    messageCache?: Map<string, WithParts[]>,
 ) {
     return async (input: {}, output: { messages: WithParts[] }) => {
         const receivedMessages = Array.isArray(output.messages) ? output.messages.length : 0
@@ -128,6 +132,15 @@ export function createChatMessageTransformHandler(
         syncCompressionBlocks(state, logger, output.messages)
         syncToolCache(state, config, logger, output.messages)
         buildToolIdList(state, output.messages)
+        const messageSessionId = output.messages[0]?.info.sessionID
+        const canCacheMessages =
+            typeof messageSessionId === "string" &&
+            messageSessionId === state.sessionId &&
+            output.messages.every((message) => message.info.sessionID === messageSessionId)
+        if (canCacheMessages && messageCache) {
+            messageCache.delete(messageSessionId)
+            messageCache.set(messageSessionId, structuredClone(output.messages))
+        }
         prune(state, logger, config, output.messages)
         await injectExtendedSubAgentResults(
             client,
@@ -290,8 +303,111 @@ export function createTextCompleteHandler() {
     }
 }
 
-export function createEventHandler(state: SessionState, logger: Logger) {
+export function createEventHandler(
+    state: SessionState,
+    logger: Logger,
+    client?: any,
+    notificationQueue?: CompressionNotificationQueue,
+    messageCache?: Map<string, WithParts[]>,
+) {
+    const sessionStatuses = new Map<string, "idle" | "busy" | "retry">()
+    const sessionsWithStatusEvents = new Set<string>()
+    const notificationControllers = new Map<string, AbortController>()
+
     return async (input: { event: any }) => {
+        const eventType = input.event?.type
+        const sessionId =
+            input.event?.properties?.sessionID ??
+            (eventType === "session.deleted" ? input.event?.properties?.info?.id : undefined)
+        const reportedStatus = input.event?.properties?.status?.type
+        if (
+            eventType === "session.status" &&
+            typeof sessionId === "string" &&
+            (reportedStatus === "idle" || reportedStatus === "busy" || reportedStatus === "retry")
+        ) {
+            sessionsWithStatusEvents.add(sessionId)
+            sessionStatuses.set(sessionId, reportedStatus)
+            if (reportedStatus !== "idle") {
+                notificationControllers
+                    .get(sessionId)
+                    ?.abort(
+                        new Error("Session became active while sending compression notification"),
+                    )
+            }
+        }
+
+        const isIdle =
+            (eventType === "session.idle" &&
+                typeof sessionId === "string" &&
+                !sessionsWithStatusEvents.has(sessionId)) ||
+            (eventType === "session.status" && reportedStatus === "idle")
+        if (isIdle && typeof sessionId === "string") {
+            sessionStatuses.set(sessionId, "idle")
+            messageCache?.delete(sessionId)
+        }
+
+        if (eventType === "session.deleted" && typeof sessionId === "string") {
+            messageCache?.delete(sessionId)
+            notificationQueue?.delete(sessionId)
+            sessionStatuses.delete(sessionId)
+            sessionsWithStatusEvents.delete(sessionId)
+            notificationControllers.get(sessionId)?.abort()
+            notificationControllers.delete(sessionId)
+        }
+
+        if (
+            isIdle &&
+            typeof sessionId === "string" &&
+            client &&
+            notificationQueue &&
+            !notificationControllers.has(sessionId)
+        ) {
+            const pending = notificationQueue.get(sessionId) ?? []
+            notificationQueue.delete(sessionId)
+            const controller = new AbortController()
+            notificationControllers.set(sessionId, controller)
+            const requeue = (remaining: typeof pending) => {
+                const queuedDuringFlush = notificationQueue.get(sessionId) ?? []
+                notificationQueue.set(sessionId, [...remaining, ...queuedDuringFlush])
+            }
+            for (let index = 0; index < pending.length; index += 1) {
+                const notification = pending[index]
+                if (!notification || sessionStatuses.get(sessionId) !== "idle") {
+                    requeue(pending.slice(index))
+                    break
+                }
+                try {
+                    await runAbortable(
+                        (signal) =>
+                            sendIgnoredMessage(
+                                client,
+                                notification.sessionId,
+                                notification.text,
+                                notification.params,
+                                logger,
+                                signal,
+                                true,
+                            ),
+                        controller.signal,
+                        "Sending compression notification",
+                        COMPRESSION_NOTIFICATION_TIMEOUT_MS,
+                    )
+                } catch (error: any) {
+                    if (sessionStatuses.get(sessionId) !== "idle") {
+                        requeue(pending.slice(index))
+                        break
+                    }
+                    logger.warn("Failed to send queued compression notification", {
+                        sessionId,
+                        error: error?.message,
+                    })
+                }
+            }
+            if (notificationControllers.get(sessionId) === controller) {
+                notificationControllers.delete(sessionId)
+            }
+        }
+
         const eventTime =
             typeof input.event?.time === "number" && Number.isFinite(input.event.time)
                 ? input.event.time

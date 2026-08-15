@@ -88,6 +88,79 @@ test("prepareSession passes cancellation to a stalled session message request", 
     assert.equal(requestSignal?.aborted, true)
 })
 
+test("prepareSession uses the transformed message cache without re-entering the session API", async () => {
+    const sessionID = "ses-cached-compression"
+    const state = createSessionState()
+    state.sessionId = sessionID
+    let sessionFetches = 0
+
+    const prepared = await prepareSession(
+        {
+            client: {
+                session: {
+                    messages: async () => {
+                        sessionFetches += 1
+                        return new Promise<never>(() => {})
+                    },
+                },
+            },
+            state,
+            logger: new Logger(false),
+            config: {
+                manualMode: { enabled: false, automaticStrategies: true },
+                compress: { permission: "allow" },
+                strategies: {
+                    deduplication: { enabled: false },
+                    purgeErrors: { enabled: false },
+                },
+            },
+            messageCache: new Map([[sessionID, []]]),
+        } as any,
+        {
+            ask: async () => {},
+            metadata: () => {},
+            sessionID,
+        },
+        "Cached compression",
+    )
+
+    assert.deepEqual(prepared.rawMessages, [])
+    assert.equal(sessionFetches, 0)
+})
+
+test("prepareSession fails safely when the runtime message snapshot is unavailable", async () => {
+    let sessionFetches = 0
+    await assert.rejects(
+        prepareSession(
+            {
+                client: {
+                    session: {
+                        messages: async () => {
+                            sessionFetches += 1
+                            return new Promise<never>(() => {})
+                        },
+                    },
+                },
+                state: createSessionState(),
+                logger: new Logger(false),
+                config: {
+                    manualMode: { enabled: false },
+                    compress: { permission: "allow" },
+                },
+                messageCache: new Map(),
+            } as any,
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID: "ses-missing-snapshot",
+            },
+            "Missing snapshot",
+        ),
+        /Compression context snapshot unavailable/,
+    )
+    assert.equal(sessionFetches, 0)
+})
+
 test("cancelled session initialization does not leave partial state", async () => {
     const controller = new AbortController()
     const state = createSessionState()

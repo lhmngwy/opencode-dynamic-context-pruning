@@ -9,7 +9,17 @@ export interface ToolContext {
     logger: Logger
     config: PluginConfig
     prompts: PromptStore
+    messageCache?: Map<string, WithParts[]>
+    notificationQueue?: CompressionNotificationQueue
 }
+
+export interface PendingCompressionNotification {
+    sessionId: string
+    text: string
+    params: any
+}
+
+export type CompressionNotificationQueue = Map<string, PendingCompressionNotification[]>
 
 export interface CompressRangeEntry {
     startId: string

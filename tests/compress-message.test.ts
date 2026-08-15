@@ -8,6 +8,7 @@ import { createSessionState, type WithParts } from "../lib/state"
 import type { PluginConfig } from "../lib/config"
 import { Logger } from "../lib/logger"
 import { formatTokenCount } from "../lib/ui/utils"
+import { createEventHandler } from "../lib/hooks"
 
 const testDataHome = join(tmpdir(), `opencode-dcp-message-tests-${process.pid}`)
 const testConfigHome = join(tmpdir(), `opencode-dcp-message-config-tests-${process.pid}`)
@@ -719,20 +720,23 @@ test("compress message mode sends compact context usage in chat notifications", 
     config.pruneNotification = "detailed"
     config.pruneNotificationType = "chat"
     const chatMessages: string[] = []
-
-    const tool = createCompressMessageTool({
-        client: {
-            session: {
-                messages: async () => ({ data: rawMessages }),
-                get: async () => ({ data: { parentID: null } }),
-                prompt: async ({ body }: { body: { parts: Array<{ text: string }> } }) => {
-                    chatMessages.push(body.parts[0]?.text || "")
-                },
+    const notificationQueue = new Map()
+    const client = {
+        session: {
+            messages: async () => ({ data: rawMessages }),
+            get: async () => ({ data: { parentID: null } }),
+            prompt: async ({ body }: { body: { parts: Array<{ text: string }> } }) => {
+                chatMessages.push(body.parts[0]?.text || "")
             },
         },
+    }
+
+    const tool = createCompressMessageTool({
+        client,
         state,
         logger: new Logger(false),
         config,
+        notificationQueue,
         prompts: {
             reload() {},
             getRuntimePrompts() {
@@ -762,9 +766,98 @@ test("compress message mode sends compact context usage in chat notifications", 
 
     const block = Array.from(state.prune.messages.blocksById.values())[0]
     const expectedAfter = 13_000 - (block?.compressedTokens ?? 0) + (block?.summaryTokens ?? 0)
+    assert.deepEqual(chatMessages, [])
+    assert.equal(notificationQueue.get(sessionID)?.length, 1)
+
+    const eventHandler = createEventHandler(state, new Logger(false), client, notificationQueue)
+    await eventHandler({
+        event: {
+            type: "session.status",
+            properties: { sessionID, status: { type: "idle" } },
+        },
+    })
+
     assert.deepEqual(chatMessages, [
         `DCP context: 13K -> ${formatTokenCount(expectedAfter, true)} tokens`,
     ])
+    assert.equal(notificationQueue.has(sessionID), false)
+})
+
+test("queued chat notifications wait for the next idle event if the session becomes busy", async () => {
+    const sessionID = "ses-notification-race"
+    let markFirstPromptStarted: (() => void) | undefined
+    const firstPromptStarted = new Promise<void>((resolve) => {
+        markFirstPromptStarted = resolve
+    })
+    let promptAttempts = 0
+    const delivered: string[] = []
+    const client = {
+        session: {
+            prompt: async ({
+                signal,
+                body,
+            }: {
+                signal: AbortSignal
+                body: { parts: Array<{ text: string }> }
+            }) => {
+                promptAttempts += 1
+                if (promptAttempts === 1) {
+                    markFirstPromptStarted?.()
+                    await new Promise<void>((_resolve, reject) => {
+                        signal.addEventListener("abort", () => reject(signal.reason), {
+                            once: true,
+                        })
+                    })
+                }
+                delivered.push(body.parts[0]?.text || "")
+            },
+        },
+    }
+    const notificationQueue = new Map([
+        [
+            sessionID,
+            [
+                {
+                    sessionId: sessionID,
+                    text: "DCP context: 10K -> 5K tokens",
+                    params: {},
+                },
+            ],
+        ],
+    ])
+    const eventHandler = createEventHandler(
+        createSessionState(),
+        new Logger(false),
+        client,
+        notificationQueue,
+    )
+
+    const firstIdle = eventHandler({
+        event: {
+            type: "session.status",
+            properties: { sessionID, status: { type: "idle" } },
+        },
+    })
+    await firstPromptStarted
+    await eventHandler({
+        event: {
+            type: "session.status",
+            properties: { sessionID, status: { type: "busy" } },
+        },
+    })
+    await firstIdle
+
+    assert.deepEqual(delivered, [])
+    assert.equal(notificationQueue.get(sessionID)?.length, 1)
+
+    await eventHandler({
+        event: {
+            type: "session.status",
+            properties: { sessionID, status: { type: "idle" } },
+        },
+    })
+    assert.deepEqual(delivered, ["DCP context: 10K -> 5K tokens"])
+    assert.equal(notificationQueue.has(sessionID), false)
 })
 
 test("compress message mode skips messages that are already actively compressed", async () => {

@@ -5,7 +5,7 @@ import { assignMessageRefs } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
 import { deduplicate, purgeErrors } from "../strategies"
 import { getCurrentParams, getCurrentTokenUsage } from "../token-utils"
-import { sendCompressNotification } from "../ui/notification"
+import { buildCompressChatNotification, sendCompressNotification } from "../ui/notification"
 import type { ToolContext } from "./types"
 import { buildSearchContext, fetchSessionMessages } from "./search"
 import type { SearchContext } from "./types"
@@ -77,12 +77,27 @@ export async function prepareSession(
 
     toolCtx.metadata({ title })
 
-    const rawMessages = await runAbortable(
-        (requestSignal) => fetchSessionMessages(ctx.client, toolCtx.sessionID, requestSignal),
-        signal,
-        "Loading session messages for compression",
-        COMPRESSION_API_TIMEOUT_MS,
-    ).catch((error) => failCompression(ctx, error))
+    const cachedMessages = ctx.messageCache?.get(toolCtx.sessionID)
+    if (ctx.messageCache && !cachedMessages) {
+        failCompression(
+            ctx,
+            new Error("Compression context snapshot unavailable; retry on the next turn."),
+        )
+    }
+    if (ctx.messageCache && ctx.state.sessionId !== toolCtx.sessionID) {
+        failCompression(
+            ctx,
+            new Error("Compression session changed before execution; retry on the next turn."),
+        )
+    }
+    const rawMessages =
+        cachedMessages ??
+        (await runAbortable(
+            (requestSignal) => fetchSessionMessages(ctx.client, toolCtx.sessionID, requestSignal),
+            signal,
+            "Loading session messages for compression",
+            COMPRESSION_API_TIMEOUT_MS,
+        ).catch((error) => failCompression(ctx, error)))
 
     await runAbortable(
         (requestSignal) =>
@@ -128,6 +143,19 @@ export async function finalizeSession(
     const sessionMessageIds = rawMessages
         .filter((msg) => !isIgnoredUserMessage(msg))
         .map((msg) => msg.info.id)
+
+    if (ctx.config.pruneNotificationType === "chat") {
+        if (ctx.config.pruneNotification !== "off" && entries.length > 0) {
+            const pending = ctx.notificationQueue?.get(toolCtx.sessionID) ?? []
+            pending.push({
+                sessionId: toolCtx.sessionID,
+                text: buildCompressChatNotification(ctx.state, entries, contextTokensBefore),
+                params,
+            })
+            ctx.notificationQueue?.set(toolCtx.sessionID, pending)
+        }
+        return
+    }
 
     try {
         const signal = toolCtx.abort ?? new AbortController().signal

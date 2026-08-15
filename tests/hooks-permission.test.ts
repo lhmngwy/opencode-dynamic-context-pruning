@@ -141,6 +141,71 @@ test("chat message transform strips hallucinated tags even when compress is deni
     assert.equal((output.messages[0]?.parts[0] as any).text, "alpha  omega")
 })
 
+test("chat message transform caches an isolated pre-prune snapshot", async () => {
+    const state = createSessionState()
+    state.sessionId = "session-1"
+    state.prune.tools.set("call-1", 100)
+    const config = buildConfig("deny")
+    config.strategies.deduplication.enabled = false
+    config.strategies.purgeErrors.enabled = false
+    const messageCache = new Map<string, WithParts[]>()
+    const handler = createChatMessageTransformHandler(
+        {},
+        state,
+        new Logger(false),
+        config,
+        {
+            reload() {},
+            getRuntimePrompts() {
+                return {} as any
+            },
+        } as any,
+        { global: undefined, agents: {} },
+        messageCache,
+    )
+    const output = {
+        messages: [
+            buildMessage("user-1", "user", "request"),
+            {
+                info: {
+                    id: "assistant-1",
+                    role: "assistant",
+                    sessionID: "session-1",
+                    model: { providerID: "openai", modelID: "test-model" },
+                    time: { created: 2 },
+                },
+                parts: [
+                    {
+                        id: "tool-1",
+                        messageID: "assistant-1",
+                        sessionID: "session-1",
+                        type: "tool",
+                        callID: "call-1",
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { filePath: "/tmp/example" },
+                            output: "original large output",
+                        },
+                    },
+                ],
+            } as WithParts,
+        ],
+    }
+    ;(output.messages[0]?.info as any).model = {
+        providerID: "openai",
+        modelID: "test-model",
+    }
+
+    await handler({}, output)
+
+    assert.notEqual((output.messages[1]?.parts[0] as any).state.output, "original large output")
+    assert.equal(
+        (messageCache.get("session-1")?.[1]?.parts[0] as any).state.output,
+        "original large output",
+    )
+})
+
 test("chat message transform drops messages without info instead of crashing", async () => {
     const state = createSessionState()
     const logger = new Logger(false)
