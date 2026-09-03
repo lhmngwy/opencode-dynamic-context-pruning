@@ -39,11 +39,11 @@ export interface NotificationEntry {
 export interface PreparedSession {
     rawMessages: WithParts[]
     searchContext: SearchContext
-    signal: AbortSignal
+    signal: readonly AbortSignal[]
 }
 
 export function failCompression(ctx: ToolContext, error: unknown): never {
-    if (ctx.state.manualMode === "compress-pending") {
+    if ((!ctx.sessionGuard || ctx.sessionGuard.isActive()) && ctx.state.manualMode === "compress-pending") {
         ctx.state.manualMode = "active"
     }
     throw error
@@ -54,8 +54,12 @@ export async function prepareSession(
     toolCtx: RunContext,
     title: string,
 ): Promise<PreparedSession> {
-    const signal = toolCtx.abort ?? new AbortController().signal
+    ctx.sessionGuard?.assertActive()
+    const signal = [toolCtx.abort, ctx.sessionGuard?.signal].filter(
+        (entry): entry is AbortSignal => entry !== undefined,
+    )
     await refreshManualMode(ctx.state, toolCtx.sessionID, ctx.logger, ctx.config.manualMode.enabled)
+    ctx.sessionGuard?.assertActive()
 
     if (ctx.state.manualMode && ctx.state.manualMode !== "compress-pending") {
         throw new Error(
@@ -78,9 +82,12 @@ export async function prepareSession(
                 }),
             signal,
             "Compression permission",
+            COMPRESSION_API_TIMEOUT_MS,
         ).catch((error) => failCompression(ctx, error))
+        ctx.sessionGuard?.assertActive()
     }
 
+    ctx.sessionGuard?.assertActive()
     toolCtx.metadata({ title })
 
     const cachedMessages = ctx.messageCache?.get(toolCtx.sessionID)
@@ -88,12 +95,6 @@ export async function prepareSession(
         failCompression(
             ctx,
             new Error("Compression context snapshot unavailable; retry on the next turn."),
-        )
-    }
-    if (ctx.messageCache && ctx.state.sessionId !== toolCtx.sessionID) {
-        failCompression(
-            ctx,
-            new Error("Compression session changed before execution; retry on the next turn."),
         )
     }
     const rawMessages =
@@ -104,6 +105,7 @@ export async function prepareSession(
             "Loading session messages for compression",
             COMPRESSION_API_TIMEOUT_MS,
         ).catch((error) => failCompression(ctx, error)))
+    ctx.sessionGuard?.assertActive()
 
     await runAbortable(
         (requestSignal) =>
@@ -115,12 +117,16 @@ export async function prepareSession(
                 rawMessages,
                 ctx.config.manualMode.enabled,
                 requestSignal,
+                () => ctx.sessionGuard?.assertActive(),
+                ctx.loadSessionState,
+                ctx.saveSessionState,
             ),
         signal,
         "Initializing compression session",
         COMPRESSION_API_TIMEOUT_MS,
     ).catch((error) => failCompression(ctx, error))
 
+    ctx.sessionGuard?.assertActive()
     assignMessageRefs(ctx.state, rawMessages)
 
     deduplicate(ctx.state, ctx.logger, ctx.config, rawMessages)
@@ -140,9 +146,19 @@ export async function finalizeSession(
     entries: NotificationEntry[],
     batchTopic: string | undefined,
 ): Promise<void> {
+    ctx.sessionGuard?.assertActive()
     ctx.state.manualMode = ctx.state.manualMode ? "active" : false
     applyPendingCompressionDurations(ctx.state)
-    await saveSessionState(ctx.state, ctx.logger)
+    ctx.sessionGuard?.assertActive()
+    const persistSessionState = ctx.saveSessionState ?? saveSessionState
+    await persistSessionState(
+        ctx.state,
+        ctx.logger,
+        undefined,
+        () => ctx.sessionGuard?.assertActive(),
+        ctx.sessionGuard?.signal,
+    )
+    ctx.sessionGuard?.assertActive()
 
     if (ctx.config.pruneNotificationType === "chat") {
         return
@@ -155,7 +171,10 @@ export async function finalizeSession(
         .map((msg) => msg.info.id)
 
     try {
-        const signal = toolCtx.abort ?? new AbortController().signal
+        ctx.sessionGuard?.assertActive()
+        const signal = [toolCtx.abort, ctx.sessionGuard?.signal].filter(
+            (entry): entry is AbortSignal => entry !== undefined,
+        )
         await runAbortable(
             (requestSignal) =>
                 sendCompressNotification(
@@ -175,10 +194,13 @@ export async function finalizeSession(
             "Sending compression notification",
             COMPRESSION_NOTIFICATION_TIMEOUT_MS,
         )
+        ctx.sessionGuard?.assertActive()
     } catch (error: any) {
+        ctx.sessionGuard?.assertActive()
         ctx.logger.warn("Failed to send compression notification", {
             sessionId: toolCtx.sessionID,
             error: error?.message,
         })
     }
+    ctx.sessionGuard?.assertActive()
 }

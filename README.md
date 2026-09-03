@@ -58,6 +58,8 @@ DCP supports two compression modes:
 
 In `range` mode, when a new compression overlaps an earlier one, the earlier summary is nested inside the new one so information is preserved through layers of compression rather than diluted away. In both modes, protected tool outputs (such as subagents and skills) and protected file patterns are kept in compression summaries, ensuring that the most important information is never lost. You can also enable `protectUserMessages` to preserve your messages verbatim during compression, though note that large prompts (e.g. copy-pasting log files in the prompt) will then never be compressed away.
 
+DCP keeps mutable state isolated per OpenCode session. Compression calls for the same session are serialized through one session-specific transaction, while independent parent and subagent sessions can compress concurrently without replacing one another's state. Deleting a session aborts its pending compression work and writes a durable deletion marker before removing persisted DCP state, so stale operations and failed cleanup cannot recreate it after restart.
+
 ### Deduplication
 
 Identifies repeated tool calls (same tool, same arguments) and keeps only the most recent output. Recalculated when the compress tool runs, so prompt cache is only impacted alongside compression.

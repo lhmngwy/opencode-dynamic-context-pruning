@@ -13,17 +13,22 @@ function abortError(reason: unknown, label: string): Error {
 
 export async function runAbortable<T>(
     operation: (signal: AbortSignal) => Promise<T>,
-    signal: AbortSignal,
+    signal: AbortSignal | readonly AbortSignal[],
     label: string,
     timeoutMs?: number,
 ): Promise<T> {
-    if (signal.aborted) {
-        throw abortError(signal.reason, label)
+    const signals = Array.isArray(signal) ? signal : [signal]
+    const alreadyAborted = signals.find((entry) => entry.aborted)
+    if (alreadyAborted) {
+        throw abortError(alreadyAborted.reason, label)
     }
 
     const controller = new AbortController()
-    const onExternalAbort = () => controller.abort(abortError(signal.reason, label))
-    signal.addEventListener("abort", onExternalAbort, { once: true })
+    const externalAbortHandlers = signals.map((entry) => {
+        const handler = () => controller.abort(abortError(entry.reason, label))
+        entry.addEventListener("abort", handler, { once: true })
+        return { signal: entry, handler }
+    })
 
     const timeout =
         timeoutMs === undefined
@@ -45,7 +50,9 @@ export async function runAbortable<T>(
     try {
         return await Promise.race([operation(controller.signal), aborted])
     } finally {
-        signal.removeEventListener("abort", onExternalAbort)
+        for (const entry of externalAbortHandlers) {
+            entry.signal.removeEventListener("abort", entry.handler)
+        }
         if (timeout !== undefined) {
             clearTimeout(timeout)
         }

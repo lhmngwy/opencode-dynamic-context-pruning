@@ -240,7 +240,7 @@ export async function handleSweepCommand(ctx: SweepCommandContext): Promise<void
     }
 
     // Persist state
-    saveSessionState(state, logger).catch((err) =>
+    await saveSessionState(state, logger).catch((err) =>
         logger.error("Failed to persist state after sweep", { error: err.message }),
     )
 

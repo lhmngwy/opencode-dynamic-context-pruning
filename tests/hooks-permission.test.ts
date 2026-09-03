@@ -11,6 +11,7 @@ import {
 import { Logger } from "../lib/logger"
 import {
     createSessionState,
+    createSessionStateRegistry,
     ensureSessionInitialized,
     refreshManualMode,
     saveManualModeSetting,
@@ -117,12 +118,17 @@ test("effective compression permission preserves explicit host ask policies", ()
 
 test("system prompt handler caches full model context for percentage thresholds", async () => {
     const state = createSessionState()
-    const handler = createSystemPromptHandler(state, new Logger(false), buildConfig("deny"), {
+    const handler = createSystemPromptHandler(
+        createSessionStateRegistry([["session-1", state]]),
+        new Logger(false),
+        buildConfig("deny"),
+        {
         reload() {},
         getRuntimePrompts() {
             return {} as any
         },
-    } as any)
+        } as any,
+    )
 
     await handler(
         {
@@ -146,7 +152,7 @@ test("chat message transform strips hallucinated tags even when compress is deni
     const config = buildConfig("deny")
     const handler = createChatMessageTransformHandler(
         { session: { get: async () => ({}) } } as any,
-        state,
+        createSessionStateRegistry([["session-1", state]]),
         logger,
         config,
         {
@@ -177,7 +183,7 @@ test("chat message transform caches an isolated pre-prune snapshot", async () =>
     const messageCache = new Map<string, WithParts[]>()
     const handler = createChatMessageTransformHandler(
         {},
-        state,
+        createSessionStateRegistry([["session-1", state]]),
         new Logger(false),
         config,
         {
@@ -238,7 +244,7 @@ test("chat message transform drops messages without info instead of crashing", a
     const config = buildConfig("deny")
     const handler = createChatMessageTransformHandler(
         { session: { get: async () => ({}) } } as any,
-        state,
+        createSessionStateRegistry([["session-1", state]]),
         logger,
         config,
         {
@@ -282,7 +288,7 @@ test("command execute exits after effective permission resolves to deny", async 
                 },
             },
         } as any,
-        createSessionState(),
+        createSessionStateRegistry(),
         new Logger(false),
         buildConfig("deny"),
         "/tmp",
@@ -307,7 +313,10 @@ test("text complete strips hallucinated metadata tags", async () => {
 test("event hook attaches durations to matching blocks by message and call id", async () => {
     const state = createSessionState()
     state.sessionId = "session-1"
-    const handler = createEventHandler(state, new Logger(false))
+    const handler = createEventHandler(
+        createSessionStateRegistry([["session-1", state]]),
+        new Logger(false),
+    )
     const originalNow = Date.now
     Date.now = () => 100
 
@@ -500,7 +509,10 @@ test("event hook attaches durations to matching blocks by message and call id", 
 test("event hook falls back to completed runtime when running duration missing", async () => {
     const state = createSessionState()
     state.sessionId = "session-1"
-    const handler = createEventHandler(state, new Logger(false))
+    const handler = createEventHandler(
+        createSessionStateRegistry([["session-1", state]]),
+        new Logger(false),
+    )
 
     state.prune.messages.blocksById.set(1, {
         blockId: 1,
@@ -589,9 +601,14 @@ test("event hook queues duration updates until the matching session is loaded", 
     })
     await saveSessionState(persistedState, logger)
 
-    const liveState = createSessionState()
-    liveState.sessionId = otherSessionId
-    const handler = createEventHandler(liveState, logger)
+    const targetState = createSessionState()
+    const otherState = createSessionState()
+    otherState.sessionId = otherSessionId
+    const sessions = createSessionStateRegistry([
+        [targetSessionId, targetState],
+        [otherSessionId, otherState],
+    ])
+    const handler = createEventHandler(sessions, logger)
 
     await handler({
         event: {
@@ -637,8 +654,9 @@ test("event hook queues duration updates until the matching session is loaded", 
         },
     })
 
-    assert.equal(liveState.compressionTiming.pendingByCallId.has("message-1:call-remote"), true)
-    assert.equal(liveState.compressionTiming.startsByCallId.has("message-1:call-remote"), false)
+    assert.equal(targetState.compressionTiming.pendingByCallId.has("message-1:call-remote"), true)
+    assert.equal(targetState.compressionTiming.startsByCallId.has("message-1:call-remote"), false)
+    assert.equal(otherState.compressionTiming.pendingByCallId.size, 0)
 
     await ensureSessionInitialized(
         {
@@ -646,7 +664,7 @@ test("event hook queues duration updates until the matching session is loaded", 
                 get: async () => ({ data: { parentID: null } }),
             },
         } as any,
-        liveState,
+        targetState,
         targetSessionId,
         logger,
         [
@@ -664,14 +682,17 @@ test("event hook queues duration updates until the matching session is loaded", 
         false,
     )
 
-    assert.equal(liveState.prune.messages.blocksById.get(1)?.durationMs, 250)
-    assert.equal(liveState.compressionTiming.pendingByCallId.has("message-1:call-remote"), false)
+    assert.equal(targetState.prune.messages.blocksById.get(1)?.durationMs, 250)
+    assert.equal(targetState.compressionTiming.pendingByCallId.has("message-1:call-remote"), false)
 })
 
 test("event hook keeps same call id distinct across message ids", async () => {
     const state = createSessionState()
     state.sessionId = "session-1"
-    const handler = createEventHandler(state, new Logger(false))
+    const handler = createEventHandler(
+        createSessionStateRegistry([["session-1", state]]),
+        new Logger(false),
+    )
 
     state.prune.messages.blocksById.set(1, {
         blockId: 1,
@@ -816,6 +837,174 @@ test("event hook keeps same call id distinct across message ids", async () => {
 
     assert.equal(state.prune.messages.blocksById.get(1)?.durationMs, 350)
     assert.equal(state.prune.messages.blocksById.get(2)?.durationMs, 150)
+})
+
+test("event hook ignores queued and late events for a deleted session", async () => {
+    const sessionID = `session-deleted-event-${Date.now()}`
+    const state = createSessionState()
+    state.sessionId = sessionID
+    const sessions = createSessionStateRegistry([[sessionID, state]])
+    const handler = createEventHandler(sessions, new Logger(false))
+    let releaseActive!: () => void
+    const activeGate = new Promise<void>((resolve) => {
+        releaseActive = resolve
+    })
+    let activeStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+        activeStarted = resolve
+    })
+    const active = sessions.runExclusive(sessionID, async () => {
+        activeStarted()
+        await activeGate
+    })
+    const activeRejection = assert.rejects(active, /has been disposed/)
+    await started
+
+    const partEvent = {
+        event: {
+            type: "message.part.updated",
+            properties: {
+                sessionID,
+                part: {
+                    type: "tool",
+                    tool: "compress",
+                    callID: "call-deleted",
+                    messageID: "message-deleted",
+                    state: { status: "pending", input: {}, raw: "" },
+                },
+            },
+            time: 100,
+        },
+    }
+    const queuedEvent = handler(partEvent)
+    const deletion = handler({
+        event: {
+            type: "session.deleted",
+            properties: { info: { id: sessionID } },
+        },
+    })
+    assert.equal(sessions.peek(sessionID), undefined)
+    const lateEvent = handler(partEvent)
+
+    releaseActive()
+    await Promise.all([activeRejection, queuedEvent, lateEvent, deletion])
+
+    assert.equal(sessions.peek(sessionID), undefined)
+    await handler(partEvent)
+    assert.equal(sessions.peek(sessionID), undefined)
+    await assert.rejects(sessions.runExclusive(sessionID, () => {}), /has been disposed/)
+})
+
+test("session deletion aborts active timing persistence without hiding other failures", async () => {
+    const sessionID = `session-deleted-timing-${Date.now()}`
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.prune.messages.blocksById.set(1, {
+        blockId: 1,
+        runId: 1,
+        active: true,
+        deactivatedByUser: false,
+        compressedTokens: 1,
+        summaryTokens: 1,
+        durationMs: 0,
+        mode: "message",
+        topic: "timing",
+        batchTopic: "timing",
+        startId: "m0001",
+        endId: "m0001",
+        anchorMessageId: "msg-a",
+        compressMessageId: "message-timing",
+        compressCallId: "call-timing",
+        includedBlockIds: [],
+        consumedBlockIds: [],
+        parentBlockIds: [],
+        directMessageIds: [],
+        directToolIds: [],
+        effectiveMessageIds: [],
+        effectiveToolIds: [],
+        createdAt: 1,
+        summary: "timing",
+    })
+    const timingBlock = structuredClone(state.prune.messages.blocksById.get(1)!)
+    state.compressionTiming.startsByCallId.set("message-timing:call-timing", 100)
+    const sessions = createSessionStateRegistry([[sessionID, state]])
+    let persistStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+        persistStarted = resolve
+    })
+    let persisted = false
+    const persist = async (
+        _state: typeof state,
+        _logger: Logger,
+        _name?: string,
+        assertActive?: () => void,
+        signal?: AbortSignal,
+    ) => {
+        persistStarted()
+        await new Promise<void>((resolve, reject) => {
+            if (signal?.aborted) {
+                reject(signal.reason)
+                return
+            }
+            signal?.addEventListener("abort", () => reject(signal.reason), { once: true })
+        })
+        assertActive?.()
+        persisted = true
+    }
+    const handler = createEventHandler(sessions, new Logger(false), undefined, persist)
+    const completedEvent = {
+        event: {
+            type: "message.part.updated",
+            properties: {
+                sessionID,
+                part: {
+                    type: "tool",
+                    tool: "compress",
+                    callID: "call-timing",
+                    messageID: "message-timing",
+                    sessionID,
+                    state: {
+                        status: "completed",
+                        input: {},
+                        output: "done",
+                        time: { start: 150, end: 250 },
+                    },
+                },
+            },
+        },
+    }
+
+    const event = handler(completedEvent)
+    await started
+    await handler({
+        event: { type: "session.deleted", properties: { info: { id: sessionID } } },
+    })
+    await event
+    assert.equal(persisted, false)
+    assert.equal(state.compressionTiming.pendingByCallId.size, 0)
+    assert.equal(sessions.peek(sessionID), undefined)
+    await assert.rejects(sessions.runExclusive(sessionID, () => {}), /has been disposed/)
+
+    const failingSessionID = `${sessionID}-failure`
+    const failingState = createSessionState()
+    failingState.sessionId = failingSessionID
+    failingState.prune.messages.blocksById.set(1, {
+        ...timingBlock,
+        durationMs: 0,
+    })
+    failingState.compressionTiming.startsByCallId.set("message-timing:call-timing", 100)
+    const failingHandler = createEventHandler(
+        createSessionStateRegistry([[failingSessionID, failingState]]),
+        new Logger(false),
+        undefined,
+        async () => {
+            throw new Error("expected persistence failure")
+        },
+    )
+    const failingEvent = structuredClone(completedEvent)
+    failingEvent.event.properties.sessionID = failingSessionID
+    failingEvent.event.properties.part.sessionID = failingSessionID
+    await assert.rejects(failingHandler(failingEvent), /expected persistence failure/)
 })
 
 test("manual mode persisted setting refreshes server session state", async () => {

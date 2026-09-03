@@ -1,7 +1,15 @@
 import type { PluginConfig } from "../config"
 import type { Logger } from "../logger"
 import type { PromptStore } from "../prompts/store"
-import type { CompressionBlock, CompressionMode, SessionState, WithParts } from "../state"
+import type { loadSessionState, saveSessionState } from "../state/persistence"
+import type {
+    CompressionBlock,
+    CompressionMode,
+    SessionState,
+    SessionOperationGuard,
+    SessionStateRegistry,
+    WithParts,
+} from "../state"
 
 export interface ToolContext {
     client: any
@@ -10,6 +18,13 @@ export interface ToolContext {
     config: PluginConfig
     prompts: PromptStore
     messageCache?: Map<string, WithParts[]>
+    sessionGuard: SessionOperationGuard
+    loadSessionState?: typeof loadSessionState
+    saveSessionState?: typeof saveSessionState
+}
+
+export interface CompressToolContext extends Omit<ToolContext, "state" | "sessionGuard"> {
+    sessions: SessionStateRegistry
 }
 
 export interface CompressRangeEntry {

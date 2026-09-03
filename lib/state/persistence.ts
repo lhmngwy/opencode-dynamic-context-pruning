@@ -42,34 +42,93 @@ export interface PersistedSessionState {
     lastUpdated: string
 }
 
-const STORAGE_DIR = join(
-    process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
-    "opencode",
-    "storage",
-    "plugin",
-    "dcp",
-)
+export class SessionStateDeletedError extends Error {
+    constructor(sessionId: string) {
+        super(`Session state ${sessionId} has been durably deleted.`)
+        this.name = "SessionStateDeletedError"
+    }
+}
+
+export interface SessionDeletionOperations {
+    markerExists?: (path: string) => boolean
+    writeMarker?: (path: string, content: string) => Promise<void>
+    renameMarker?: (temporaryPath: string, markerPath: string) => Promise<void>
+    retryDelay?: (attempt: number) => Promise<void>
+    markerAttempts?: number
+}
+
+let deletionMarkerAttemptId = 0
+
+function getStorageDir(): string {
+    return join(
+        process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+        "opencode",
+        "storage",
+        "plugin",
+        "dcp",
+    )
+}
 
 async function ensureStorageDir(): Promise<void> {
-    if (!existsSync(STORAGE_DIR)) {
-        await fs.mkdir(STORAGE_DIR, { recursive: true })
+    const storageDir = getStorageDir()
+    if (!existsSync(storageDir)) {
+        await fs.mkdir(storageDir, { recursive: true })
     }
 }
 
 function getSessionFilePath(sessionId: string): string {
-    return join(STORAGE_DIR, `${sessionId}.json`)
+    return join(getStorageDir(), `${sessionId}.json`)
+}
+
+function getSessionDeletionMarkerPath(sessionId: string): string {
+    return `${getSessionFilePath(sessionId)}.deleted`
+}
+
+function isDeletedSession(sessionId: string): boolean {
+    return existsSync(getSessionDeletionMarkerPath(sessionId))
 }
 
 async function writePersistedSessionState(
     sessionId: string,
     state: PersistedSessionState,
     logger: Logger,
+    assertActive?: () => void,
+    signal?: AbortSignal,
 ): Promise<void> {
     await ensureStorageDir()
+    assertActive?.()
+    if (isDeletedSession(sessionId)) {
+        throw new SessionStateDeletedError(sessionId)
+    }
 
     const filePath = getSessionFilePath(sessionId)
+    const temporaryFilePath = `${filePath}.tmp`
     const content = JSON.stringify(state, null, 2)
-    await fs.writeFile(filePath, content, "utf-8")
+    try {
+        await fs.writeFile(temporaryFilePath, content, {
+            encoding: "utf-8",
+            signal,
+        })
+        assertActive?.()
+        if (isDeletedSession(sessionId)) {
+            throw new SessionStateDeletedError(sessionId)
+        }
+        await fs.rename(temporaryFilePath, filePath)
+        assertActive?.()
+        if (isDeletedSession(sessionId)) {
+            await fs.rm(filePath, { force: true })
+            throw new SessionStateDeletedError(sessionId)
+        }
+    } catch (error) {
+        await fs.rm(temporaryFilePath, { force: true })
+        try {
+            assertActive?.()
+        } catch (disposedError) {
+            await fs.rm(filePath, { force: true })
+            throw disposedError
+        }
+        throw error
+    }
 
     logger.info("Saved session state to disk", {
         sessionId,
@@ -81,6 +140,8 @@ export async function saveSessionState(
     sessionState: SessionState,
     logger: Logger,
     sessionName?: string,
+    assertActive?: () => void,
+    signal?: AbortSignal,
 ): Promise<void> {
     try {
         if (!sessionState.sessionId) {
@@ -99,31 +160,131 @@ export async function saveSessionState(
                 turnNudgeAnchors: Array.from(sessionState.nudges.turnNudgeAnchors),
                 iterationNudgeAnchors: Array.from(sessionState.nudges.iterationNudgeAnchors),
             },
-            stats: sessionState.stats,
+            stats: { ...sessionState.stats },
             lastUpdated: new Date().toISOString(),
         }
 
-        await writePersistedSessionState(sessionState.sessionId, state, logger)
+        await writePersistedSessionState(
+            sessionState.sessionId,
+            state,
+            logger,
+            assertActive,
+            signal,
+        )
     } catch (error: any) {
         logger.error("Failed to save session state", {
             sessionId: sessionState.sessionId,
             error: error?.message,
         })
+        assertActive?.()
+        if (error instanceof SessionStateDeletedError) {
+            throw error
+        }
     }
+}
+
+export async function deleteSessionState(
+    sessionId: string,
+    logger: Logger,
+    removeFile: (path: string) => Promise<void> = (path) => fs.rm(path, { force: true }),
+    operations: SessionDeletionOperations = {},
+): Promise<{ removed: boolean }> {
+    const filePath = getSessionFilePath(sessionId)
+    const markerPath = getSessionDeletionMarkerPath(sessionId)
+    const markerExists = operations.markerExists ?? existsSync
+    const writeMarker =
+        operations.writeMarker ??
+        ((path: string, content: string) => fs.writeFile(path, content, "utf-8"))
+    const renameMarker = operations.renameMarker ?? ((temporaryPath, path) => fs.rename(temporaryPath, path))
+    const retryDelay =
+        operations.retryDelay ??
+        ((attempt: number) => new Promise<void>((resolve) => setTimeout(resolve, attempt * 10)))
+    const markerAttempts = Math.max(1, operations.markerAttempts ?? 3)
+    let markerError: unknown
+
+    for (let attempt = 1; attempt <= markerAttempts && !markerExists(markerPath); attempt += 1) {
+        const temporaryMarkerPath = `${markerPath}.${process.pid}.${++deletionMarkerAttemptId}.tmp`
+        try {
+            await ensureStorageDir()
+            if (markerExists(markerPath)) {
+                break
+            }
+            await writeMarker(temporaryMarkerPath, "deleted\n")
+            if (markerExists(markerPath)) {
+                await fs.rm(temporaryMarkerPath, { force: true })
+                break
+            }
+            await renameMarker(temporaryMarkerPath, markerPath)
+        } catch (error: any) {
+            markerError = error
+            await fs.rm(temporaryMarkerPath, { force: true }).catch(() => {})
+            if (markerExists(markerPath)) {
+                break
+            }
+            logger.warn("Retrying session deletion fence", {
+                sessionId,
+                attempt,
+                error: error?.message,
+            })
+            if (attempt < markerAttempts) {
+                await retryDelay(attempt)
+            }
+        }
+    }
+
+    const removals = await Promise.allSettled([
+        removeFile(filePath),
+        removeFile(`${filePath}.tmp`),
+    ])
+    const failures = removals.filter((result) => result.status === "rejected")
+    if (!markerExists(markerPath)) {
+        logger.error("Failed to persist session deletion fence", {
+            sessionId,
+            error: markerError instanceof Error ? markerError.message : String(markerError),
+            cleanupFailures: failures.map((result) =>
+                result.status === "rejected" && result.reason instanceof Error
+                    ? result.reason.message
+                    : String(result),
+            ),
+        })
+        throw new AggregateError(
+            [markerError, ...failures.map((result) => result.status === "rejected" && result.reason)],
+            `Failed to durably delete session state ${sessionId}`,
+        )
+    }
+
+    if (failures.length === 0) {
+        logger.info("Deleted session state from disk", { sessionId })
+        return { removed: true }
+    }
+
+    logger.warn("Session state deletion remains fenced but physical cleanup is incomplete", {
+        sessionId,
+        failures: failures.map((result) =>
+            result.status === "rejected" && result.reason instanceof Error
+                ? result.reason.message
+                : String(result),
+        ),
+    })
+    return { removed: false }
 }
 
 export async function loadSessionState(
     sessionId: string,
     logger: Logger,
+    signal?: AbortSignal,
 ): Promise<PersistedSessionState | null> {
     try {
         const filePath = getSessionFilePath(sessionId)
 
-        if (!existsSync(filePath)) {
+        if (isDeletedSession(sessionId) || !existsSync(filePath)) {
             return null
         }
 
-        const content = await fs.readFile(filePath, "utf-8")
+        const content = await fs.readFile(filePath, { encoding: "utf-8", signal })
+        if (isDeletedSession(sessionId)) {
+            return null
+        }
         const state = JSON.parse(content) as PersistedSessionState
 
         const hasPruneTools = state?.prune?.tools && typeof state.prune.tools === "object"
@@ -268,16 +429,19 @@ export async function loadAllSessionStats(logger: Logger): Promise<AggregatedSta
     }
 
     try {
-        if (!existsSync(STORAGE_DIR)) {
+        const storageDir = getStorageDir()
+        if (!existsSync(storageDir)) {
             return result
         }
 
-        const files = await fs.readdir(STORAGE_DIR)
-        const jsonFiles = files.filter((f) => f.endsWith(".json"))
+        const files = await fs.readdir(storageDir)
+        const jsonFiles = files.filter(
+            (f) => f.endsWith(".json") && !existsSync(join(storageDir, `${f}.deleted`)),
+        )
 
         for (const file of jsonFiles) {
             try {
-                const filePath = join(STORAGE_DIR, file)
+                const filePath = join(storageDir, file)
                 const content = await fs.readFile(filePath, "utf-8")
                 const state = JSON.parse(content) as PersistedSessionState
 

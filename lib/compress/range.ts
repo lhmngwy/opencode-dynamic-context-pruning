@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import type { ToolContext } from "./types"
+import type { CompressToolContext, ToolContext } from "./types"
 import { countTokens } from "../token-utils"
 import { RANGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
 import {
@@ -59,14 +59,16 @@ function buildSchema() {
     }
 }
 
-export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof tool> {
-    ctx.prompts.reload()
-    const runtimePrompts = ctx.prompts.getRuntimePrompts()
+export function createCompressRangeTool(sharedCtx: CompressToolContext): ReturnType<typeof tool> {
+    sharedCtx.prompts.reload()
+    const runtimePrompts = sharedCtx.prompts.getRuntimePrompts()
 
     return tool({
         description: runtimePrompts.compressRange + RANGE_FORMAT_EXTENSION,
         args: buildSchema(),
         async execute(args, toolCtx) {
+            return sharedCtx.sessions.runExclusive(toolCtx.sessionID, async (state, sessionGuard) => {
+                const ctx: ToolContext = { ...sharedCtx, state, sessionGuard }
             const input = args as CompressRangeToolArgs
             validateArgs(input)
             const callId =
@@ -143,6 +145,7 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                     "Loading protected compression content",
                     COMPRESSION_API_TIMEOUT_MS,
                 ).catch((error) => failCompression(ctx, error))
+                ctx.sessionGuard.assertActive()
 
                 const completedSummary = appendMissingBlockSummaries(
                     summaryWithTools,
@@ -160,6 +163,7 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
                 })
             }
 
+            ctx.sessionGuard.assertActive()
             const runId = allocateRunId(ctx.state)
 
             for (const preparedPlan of preparedPlans) {
@@ -200,6 +204,7 @@ export function createCompressRangeTool(ctx: ToolContext): ReturnType<typeof too
             await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
 
             return `Compressed ${totalCompressedMessages} messages into ${COMPRESSED_BLOCK_HEADER}.`
+            })
         },
     })
 }

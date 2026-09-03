@@ -7,7 +7,7 @@ import { createCompressMessageTool } from "../lib/compress/message"
 import { createCompressRangeTool } from "../lib/compress/range"
 import { handleDecompressCommand } from "../lib/commands/decompress"
 import { handleRecompressCommand } from "../lib/commands/recompress"
-import { createSessionState, type WithParts } from "../lib/state"
+import { createSessionState, createSessionStateRegistry, type WithParts } from "../lib/state"
 import type { PluginConfig } from "../lib/config"
 import { Logger } from "../lib/logger"
 
@@ -161,6 +161,7 @@ test("compression notifications increment by tool call across range and message 
     const sessionID = `ses_compression_notifications_${Date.now()}`
     const rawMessages = buildMessages(sessionID)
     const state = createSessionState()
+    const sessions = createSessionStateRegistry([[sessionID, state]])
     const logger = new Logger(false)
     const toastCalls: string[] = []
     const client = {
@@ -184,7 +185,7 @@ test("compression notifications increment by tool call across range and message 
 
     const rangeTool = createCompressRangeTool({
         client,
-        state,
+        sessions,
         logger,
         config: rangeConfig,
         prompts: {
@@ -218,7 +219,7 @@ test("compression notifications increment by tool call across range and message 
 
     const messageTool = createCompressMessageTool({
         client,
-        state,
+        sessions,
         logger,
         config: messageConfig,
         prompts: {
@@ -262,6 +263,7 @@ test("decompress groups batched message compressions by tool call", async () => 
     const sessionID = `ses_message_grouped_decompress_${Date.now()}`
     const rawMessages = buildMessages(sessionID)
     const state = createSessionState()
+    const sessions = createSessionStateRegistry([[sessionID, state]])
     const logger = new Logger(false)
     const ignoredMessages: string[] = []
     const client = {
@@ -276,7 +278,7 @@ test("decompress groups batched message compressions by tool call", async () => 
 
     const tool = createCompressMessageTool({
         client,
-        state,
+        sessions,
         logger,
         config: buildConfig("message"),
         prompts: {
@@ -362,6 +364,7 @@ test("decompress keeps batched ranges individually restorable", async () => {
     const sessionID = `ses_range_individual_decompress_${Date.now()}`
     const rawMessages = buildMessages(sessionID)
     const state = createSessionState()
+    const sessions = createSessionStateRegistry([[sessionID, state]])
     const logger = new Logger(false)
     const ignoredMessages: string[] = []
     const client = {
@@ -376,7 +379,7 @@ test("decompress keeps batched ranges individually restorable", async () => {
 
     const tool = createCompressRangeTool({
         client,
-        state,
+        sessions,
         logger,
         config: buildConfig("range"),
         prompts: {

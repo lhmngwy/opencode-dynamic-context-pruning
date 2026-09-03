@@ -30,14 +30,14 @@ import {
     isContextOverLimits,
 } from "./utils"
 
-export const injectCompressNudges = (
+export const injectCompressNudges = async (
     state: SessionState,
     config: PluginConfig,
     logger: Logger,
     messages: WithParts[],
     prompts: RuntimePrompts,
     compressionPriorities?: CompressionPriorityMap,
-): void => {
+): Promise<void> => {
     if (compressPermission(state, config) === "deny") {
         return
     }
@@ -53,7 +53,7 @@ export const injectCompressNudges = (
         state.nudges.contextLimitAnchors.clear()
         state.nudges.turnNudgeAnchors.clear()
         state.nudges.iterationNudgeAnchors.clear()
-        void saveSessionState(state, logger)
+        await saveSessionState(state, logger)
         return
     }
 
@@ -138,7 +138,7 @@ export const injectCompressNudges = (
     applyAnchoredNudges(state, config, messages, prompts, compressionPriorities)
 
     if (anchorsChanged) {
-        void saveSessionState(state, logger)
+        await saveSessionState(state, logger)
     }
 }
 

@@ -7,7 +7,7 @@ import {
     type HostPermissionSnapshot,
 } from "./lib/host-permissions"
 import { Logger } from "./lib/logger"
-import { createSessionState } from "./lib/state"
+import { createSessionStateRegistry } from "./lib/state"
 import { PromptStore } from "./lib/prompts/store"
 import {
     createChatMessageTransformHandler,
@@ -28,7 +28,7 @@ const server: Plugin = (async (ctx) => {
     }
 
     const logger = new Logger(config.debug)
-    const state = createSessionState()
+    const sessions = createSessionStateRegistry()
     const prompts = new PromptStore(logger, ctx.directory, config.experimental.customPrompts)
     const hostPermissions: HostPermissionSnapshot = {
         global: undefined,
@@ -49,7 +49,7 @@ const server: Plugin = (async (ctx) => {
 
     const compressToolContext = {
         client: ctx.client,
-        state,
+        sessions,
         logger,
         config,
         prompts,
@@ -58,14 +58,14 @@ const server: Plugin = (async (ctx) => {
 
     return {
         "experimental.chat.system.transform": createSystemPromptHandler(
-            state,
+            sessions,
             logger,
             config,
             prompts,
         ),
         "experimental.chat.messages.transform": createChatMessageTransformHandler(
             ctx.client,
-            state,
+            sessions,
             logger,
             config,
             prompts,
@@ -75,13 +75,13 @@ const server: Plugin = (async (ctx) => {
         "experimental.text.complete": createTextCompleteHandler(),
         "command.execute.before": createCommandExecuteHandler(
             ctx.client,
-            state,
+            sessions,
             logger,
             config,
             ctx.directory,
             hostPermissions,
         ),
-        event: createEventHandler(state, logger, messageCache),
+        event: createEventHandler(sessions, logger, messageCache),
         tool: {
             ...(config.compress.permission !== "deny" && {
                 compress:

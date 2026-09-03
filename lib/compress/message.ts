@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import type { ToolContext } from "./types"
+import type { CompressToolContext, ToolContext } from "./types"
 import { countTokens } from "../token-utils"
 import { MESSAGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
 import { formatIssues, formatResult, resolveMessages, validateArgs } from "./message-utils"
@@ -44,14 +44,16 @@ function buildSchema() {
     }
 }
 
-export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof tool> {
-    ctx.prompts.reload()
-    const runtimePrompts = ctx.prompts.getRuntimePrompts()
+export function createCompressMessageTool(sharedCtx: CompressToolContext): ReturnType<typeof tool> {
+    sharedCtx.prompts.reload()
+    const runtimePrompts = sharedCtx.prompts.getRuntimePrompts()
 
     return tool({
         description: runtimePrompts.compressMessage + MESSAGE_FORMAT_EXTENSION,
         args: buildSchema(),
         async execute(args, toolCtx) {
+            return sharedCtx.sessions.runExclusive(toolCtx.sessionID, async (state, sessionGuard) => {
+                const ctx: ToolContext = { ...sharedCtx, state, sessionGuard }
             const input = args as CompressMessageToolArgs
             validateArgs(input)
             const callId =
@@ -108,6 +110,7 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                     "Loading protected compression content",
                     COMPRESSION_API_TIMEOUT_MS,
                 ).catch((error) => failCompression(ctx, error))
+                ctx.sessionGuard.assertActive()
 
                 preparedPlans.push({
                     plan,
@@ -115,6 +118,7 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
                 })
             }
 
+            ctx.sessionGuard.assertActive()
             const runId = allocateRunId(ctx.state)
 
             for (const { plan, summaryWithTools } of preparedPlans) {
@@ -153,6 +157,7 @@ export function createCompressMessageTool(ctx: ToolContext): ReturnType<typeof t
             await finalizeSession(ctx, toolCtx, rawMessages, notifications, input.topic)
 
             return formatResult(plans.length, skippedIssues, skippedCount)
+            })
         },
     })
 }

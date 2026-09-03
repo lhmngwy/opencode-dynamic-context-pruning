@@ -1,4 +1,5 @@
 export * from "./persistence"
 export * from "./types"
 export * from "./state"
+export * from "./registry"
 export * from "./tool-cache"

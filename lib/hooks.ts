@@ -1,4 +1,11 @@
-import type { SessionState, WithParts } from "./state"
+import {
+    createSessionState,
+    SessionDisposedError,
+    deleteSessionState,
+    type SessionState,
+    type SessionStateRegistry,
+    type WithParts,
+} from "./state"
 import type { Logger } from "./logger"
 import type { PluginConfig } from "./config"
 import { assignMessageRefs } from "./message-ids"
@@ -47,7 +54,7 @@ const INTERNAL_AGENT_SIGNATURES = [
 ]
 
 export function createSystemPromptHandler(
-    state: SessionState,
+    sessions: SessionStateRegistry,
     logger: Logger,
     config: PluginConfig,
     prompts: PromptStore,
@@ -56,49 +63,56 @@ export function createSystemPromptHandler(
         input: { sessionID?: string; model: { limit: { context: number } } },
         output: { system: string[] },
     ) => {
-        if (input.model?.limit?.context) {
-            state.modelContextLimit = input.model.limit.context
-            logger.debug("Cached model context limit", { limit: state.modelContextLimit })
-        }
+        const applyPrompt = async (state: SessionState) => {
+            if (input.model?.limit?.context) {
+                state.modelContextLimit = input.model.limit.context
+                logger.debug("Cached model context limit", { limit: state.modelContextLimit })
+            }
 
-        if (state.isSubAgent && !config.experimental.allowSubAgents) {
-            return
-        }
+            if (state.isSubAgent && !config.experimental.allowSubAgents) {
+                return
+            }
 
-        const systemText = output.system.join("\n")
-        if (INTERNAL_AGENT_SIGNATURES.some((sig) => systemText.includes(sig))) {
-            logger.info("Skipping DCP system prompt injection for internal agent")
-            return
-        }
+            const systemText = output.system.join("\n")
+            if (INTERNAL_AGENT_SIGNATURES.some((sig) => systemText.includes(sig))) {
+                logger.info("Skipping DCP system prompt injection for internal agent")
+                return
+            }
 
-        const effectivePermission =
-            input.sessionID && state.sessionId === input.sessionID
+            const effectivePermission = input.sessionID
                 ? compressPermission(state, config)
                 : config.compress.permission
 
-        if (effectivePermission === "deny") {
-            return
+            if (effectivePermission === "deny") {
+                return
+            }
+
+            prompts.reload()
+            const runtimePrompts = prompts.getRuntimePrompts()
+            const newPrompt = renderSystemPrompt(
+                runtimePrompts,
+                buildProtectedToolsExtension(config.compress.protectedTools),
+                !!state.manualMode,
+                state.isSubAgent && config.experimental.allowSubAgents,
+            )
+            if (output.system.length > 0) {
+                output.system[output.system.length - 1] += "\n\n" + newPrompt
+            } else {
+                output.system.push(newPrompt)
+            }
         }
 
-        prompts.reload()
-        const runtimePrompts = prompts.getRuntimePrompts()
-        const newPrompt = renderSystemPrompt(
-            runtimePrompts,
-            buildProtectedToolsExtension(config.compress.protectedTools),
-            !!state.manualMode,
-            state.isSubAgent && config.experimental.allowSubAgents,
-        )
-        if (output.system.length > 0) {
-            output.system[output.system.length - 1] += "\n\n" + newPrompt
+        if (input.sessionID) {
+            await sessions.runExclusive(input.sessionID, applyPrompt)
         } else {
-            output.system.push(newPrompt)
+            await applyPrompt(createSessionState())
         }
     }
 }
 
 export function createChatMessageTransformHandler(
     client: any,
-    state: SessionState,
+    sessions: SessionStateRegistry,
     logger: Logger,
     config: PluginConfig,
     prompts: PromptStore,
@@ -115,7 +129,17 @@ export function createChatMessageTransformHandler(
             })
         }
 
-        await checkSession(client, state, logger, output.messages, config.manualMode.enabled)
+        const messageSessionId = messages[0]?.info.sessionID
+        if (
+            typeof messageSessionId !== "string" ||
+            !messages.every((message) => message.info.sessionID === messageSessionId)
+        ) {
+            stripHallucinations(output.messages)
+            return
+        }
+
+        await sessions.runExclusive(messageSessionId, async (state, guard) => {
+            await checkSession(client, state, logger, output.messages, config.manualMode.enabled, guard)
 
         syncCompressPermissionState(state, config, hostPermissions, output.messages)
 
@@ -129,12 +153,7 @@ export function createChatMessageTransformHandler(
         syncCompressionBlocks(state, logger, output.messages)
         syncToolCache(state, config, logger, output.messages)
         buildToolIdList(state, output.messages)
-        const messageSessionId = output.messages[0]?.info.sessionID
-        const canCacheMessages =
-            typeof messageSessionId === "string" &&
-            messageSessionId === state.sessionId &&
-            output.messages.every((message) => message.info.sessionID === messageSessionId)
-        if (canCacheMessages && messageCache) {
+        if (messageCache) {
             messageCache.delete(messageSessionId)
             messageCache.set(messageSessionId, structuredClone(output.messages))
         }
@@ -148,7 +167,7 @@ export function createChatMessageTransformHandler(
         )
         const compressionPriorities = buildPriorityMap(config, state, output.messages)
         prompts.reload()
-        injectCompressNudges(
+        await injectCompressNudges(
             state,
             config,
             logger,
@@ -163,12 +182,13 @@ export function createChatMessageTransformHandler(
         if (state.sessionId) {
             await logger.saveContext(state.sessionId, output.messages)
         }
+        })
     }
 }
 
 export function createCommandExecuteHandler(
     client: any,
-    state: SessionState,
+    sessions: SessionStateRegistry,
     logger: Logger,
     config: PluginConfig,
     workingDirectory: string,
@@ -183,6 +203,7 @@ export function createCommandExecuteHandler(
         }
 
         if (input.command === "dcp" || input.command === "dcp-compress") {
+            return sessions.runExclusive(input.sessionID, async (state, guard) => {
             const messagesResponse = await client.session.messages({
                 path: { id: input.sessionID },
             })
@@ -195,6 +216,8 @@ export function createCommandExecuteHandler(
                 logger,
                 messages,
                 config.manualMode.enabled,
+                guard.signal,
+                () => guard.assertActive(),
             )
 
             syncCompressPermissionState(state, config, hostPermissions, messages)
@@ -287,6 +310,7 @@ export function createCommandExecuteHandler(
 
             await handleHelpCommand(commandCtx)
             return
+            })
         }
     }
 }
@@ -301,14 +325,16 @@ export function createTextCompleteHandler() {
 }
 
 export function createEventHandler(
-    state: SessionState,
+    sessions: SessionStateRegistry,
     logger: Logger,
     messageCache?: Map<string, WithParts[]>,
+    persistSessionState: typeof saveSessionState = saveSessionState,
 ) {
     return async (input: { event: any }) => {
         const eventType = input.event?.type
         const sessionId =
             input.event?.properties?.sessionID ??
+            input.event?.properties?.part?.sessionID ??
             (eventType === "session.deleted" ? input.event?.properties?.info?.id : undefined)
         const reportedStatus = input.event?.properties?.status?.type
         const isIdle =
@@ -320,6 +346,8 @@ export function createEventHandler(
 
         if (eventType === "session.deleted" && typeof sessionId === "string") {
             messageCache?.delete(sessionId)
+            await sessions.dispose(sessionId, () => deleteSessionState(sessionId, logger))
+            return
         }
 
         const eventTime =
@@ -333,6 +361,14 @@ export function createEventHandler(
         if (input.event.type !== "message.part.updated") {
             return
         }
+
+        if (typeof sessionId !== "string") {
+            return
+        }
+
+        try {
+            await sessions.runExclusive(sessionId, async (state, guard) => {
+        guard.assertActive()
 
         const part = input.event.properties?.part
         if (part?.type !== "tool" || part.tool !== "compress") {
@@ -350,6 +386,7 @@ export function createEventHandler(
                 return
             }
             state.compressionTiming.startsByCallId.set(key, startedAt)
+            guard.assertActive()
             logger.debug("Recorded compression start", {
                 messageID: part.messageID,
                 callID: part.callID,
@@ -376,12 +413,20 @@ export function createEventHandler(
                 durationMs,
             })
 
+            guard.assertActive()
             const updates = applyPendingCompressionDurations(state)
             if (updates === 0) {
                 return
             }
 
-            await saveSessionState(state, logger)
+            await persistSessionState(
+                state,
+                logger,
+                undefined,
+                () => guard.assertActive(),
+                guard.signal,
+            )
+            guard.assertActive()
 
             logger.info("Attached compression time to blocks", {
                 messageID: part.messageID,
@@ -400,6 +445,13 @@ export function createEventHandler(
             state.compressionTiming.startsByCallId.delete(
                 buildCompressionTimingKey(part.messageID, part.callID),
             )
+        }
+            })
+        } catch (error) {
+            if (error instanceof SessionDisposedError) {
+                return
+            }
+            throw error
         }
     }
 }

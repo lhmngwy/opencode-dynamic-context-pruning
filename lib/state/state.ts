@@ -13,6 +13,7 @@ import {
     collectTurnNudgeAnchors,
 } from "./utils"
 import { getLastUserMessage } from "../messages/query"
+import type { SessionOperationGuard } from "./registry"
 
 export const checkSession = async (
     client: any,
@@ -20,6 +21,7 @@ export const checkSession = async (
     logger: Logger,
     messages: WithParts[],
     manualModeDefault: boolean,
+    sessionGuard?: SessionOperationGuard,
 ): Promise<void> => {
     const lastUserMessage = getLastUserMessage(messages)
     if (!lastUserMessage) {
@@ -38,12 +40,16 @@ export const checkSession = async (
                 logger,
                 messages,
                 manualModeDefault,
+                sessionGuard?.signal,
+                () => sessionGuard?.assertActive(),
             )
         } catch (err: any) {
+            sessionGuard?.assertActive()
             logger.error("Failed to initialize session state", { error: err.message })
         }
     }
 
+    sessionGuard?.assertActive()
     const lastCompactionTimestamp = findLastCompactionTimestamp(messages)
     if (lastCompactionTimestamp > state.lastCompaction) {
         state.lastCompaction = lastCompactionTimestamp
@@ -52,7 +58,14 @@ export const checkSession = async (
             timestamp: lastCompactionTimestamp,
         })
 
-        saveSessionState(state, logger).catch((error) => {
+        await saveSessionState(
+            state,
+            logger,
+            undefined,
+            () => sessionGuard?.assertActive(),
+            sessionGuard?.signal,
+        ).catch((error) => {
+            sessionGuard?.assertActive()
             logger.warn("Failed to persist state reset after compaction", {
                 error: error instanceof Error ? error.message : String(error),
             })
@@ -102,7 +115,7 @@ export function createSessionState(): SessionState {
     }
 }
 
-export function resetSessionState(state: SessionState): void {
+export function resetSessionState(state: SessionState, clearCompressionTiming = false): void {
     state.sessionId = null
     state.isSubAgent = false
     state.manualMode = false
@@ -120,6 +133,10 @@ export function resetSessionState(state: SessionState): void {
     state.stats = {
         pruneTokenCounter: 0,
         totalPruneTokens: 0,
+    }
+    if (clearCompressionTiming) {
+        state.compressionTiming.startsByCallId.clear()
+        state.compressionTiming.pendingByCallId.clear()
     }
     state.toolParameters.clear()
     state.subAgentResultCache.clear()
@@ -143,7 +160,11 @@ export async function ensureSessionInitialized(
     messages: WithParts[],
     manualModeEnabled: boolean,
     signal?: AbortSignal,
+    assertActive?: () => void,
+    loadPersistedState: typeof loadSessionState = loadSessionState,
+    persistSessionState: typeof saveSessionState = saveSessionState,
 ): Promise<void> {
+    assertActive?.()
     if (state.sessionId === sessionId) {
         return
     }
@@ -152,6 +173,7 @@ export async function ensureSessionInitialized(
     // logger.info("Initializing session state", { sessionId: sessionId })
 
     const isSubAgent = await isSubAgentSession(client, sessionId, signal)
+    assertActive?.()
 
     resetSessionState(state)
     state.manualMode = manualModeEnabled ? "active" : false
@@ -163,7 +185,8 @@ export async function ensureSessionInitialized(
     state.currentTurn = countTurns(state, messages)
     state.nudges.turnNudgeAnchors = collectTurnNudgeAnchors(messages)
 
-    const persisted = await loadSessionState(sessionId, logger)
+    const persisted = await loadPersistedState(sessionId, logger, signal)
+    assertActive?.()
     if (persisted === null) {
         return
     }
@@ -189,7 +212,8 @@ export async function ensureSessionInitialized(
 
     const applied = applyPendingCompressionDurations(state)
     if (applied > 0) {
-        await saveSessionState(state, logger)
+        await persistSessionState(state, logger, undefined, assertActive, signal)
+        assertActive?.()
     }
 }
 
