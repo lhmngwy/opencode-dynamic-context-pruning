@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import test from "node:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import test, { after, before } from "node:test"
 import type { PluginConfig } from "../lib/config"
 import {
     createChatMessageTransformHandler,
@@ -19,6 +22,27 @@ import {
     type WithParts,
 } from "../lib/state"
 import { resolveEffectiveCompressPermission } from "../lib/host-permissions"
+
+let testDataHome = ""
+let previousDataHome: string | undefined
+
+before(async () => {
+    previousDataHome = process.env.XDG_DATA_HOME
+    testDataHome = await mkdtemp(join(tmpdir(), "opencode-dcp-hooks-tests-"))
+    process.env.XDG_DATA_HOME = testDataHome
+})
+
+after(async () => {
+    if (previousDataHome === undefined) {
+        delete process.env.XDG_DATA_HOME
+    } else {
+        process.env.XDG_DATA_HOME = previousDataHome
+    }
+
+    if (testDataHome) {
+        await rm(testDataHome, { recursive: true, force: true })
+    }
+})
 
 function buildConfig(permission: "allow" | "ask" | "deny" = "allow"): PluginConfig {
     return {
@@ -144,6 +168,69 @@ test("system prompt handler caches full model context for percentage thresholds"
     )
 
     assert.equal(state.modelContextLimit, 200000)
+})
+
+function buildPromptStore() {
+    return {
+        reload() {},
+        getRuntimePrompts() {
+            return {
+                system: "DCP-RUNTIME-PROMPT",
+                manualExtension: "",
+                subagentExtension: "",
+            }
+        },
+    } as any
+}
+
+test("system prompt handler injects nudges for main session with bundled internal prompts", async () => {
+    const state = createSessionState()
+    const handler = createSystemPromptHandler(
+        createSessionStateRegistry([["session-1", state]]),
+        new Logger(false),
+        buildConfig("allow"),
+        buildPromptStore(),
+    )
+    const output = {
+        system: [
+            "You are the primary coding assistant for this repository.",
+            "You are a title generator for short session names.",
+        ],
+    }
+
+    await handler(
+        {
+            sessionID: "session-1",
+            model: { limit: { context: 200000 } },
+        } as any,
+        output,
+    )
+
+    assert.match(output.system[output.system.length - 1], /DCP-RUNTIME-PROMPT/)
+})
+
+test("system prompt handler skips injection for internal agent calls", async () => {
+    const state = createSessionState()
+    const handler = createSystemPromptHandler(
+        createSessionStateRegistry([["session-1", state]]),
+        new Logger(false),
+        buildConfig("allow"),
+        buildPromptStore(),
+    )
+    const output = {
+        system: ["You are a title generator. Return only a short title."],
+    }
+
+    await handler(
+        {
+            sessionID: "session-1",
+            model: { limit: { context: 200000 } },
+        } as any,
+        output,
+    )
+
+    assert.equal(output.system.length, 1)
+    assert.doesNotMatch(output.system[0], /DCP-RUNTIME-PROMPT/)
 })
 
 test("chat message transform strips hallucinated tags even when compress is denied", async () => {

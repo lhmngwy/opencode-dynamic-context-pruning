@@ -147,7 +147,16 @@ export async function finalizeSession(
     batchTopic: string | undefined,
 ): Promise<void> {
     ctx.sessionGuard?.assertActive()
-    ctx.state.manualMode = ctx.state.manualMode ? "active" : false
+    if (ctx.state.manualMode === "compress-pending") {
+        ctx.state.manualMode = false
+        await refreshManualMode(
+            ctx.state,
+            toolCtx.sessionID,
+            ctx.logger,
+            ctx.config.manualMode.enabled,
+        )
+        ctx.sessionGuard?.assertActive()
+    }
     applyPendingCompressionDurations(ctx.state)
     ctx.sessionGuard?.assertActive()
     const persistSessionState = ctx.saveSessionState ?? saveSessionState

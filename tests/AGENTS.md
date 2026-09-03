@@ -15,6 +15,7 @@
 - Deletion races prove active compression cannot save, notify, or retain state and stale events resolve benignly.
 - Boundary tests pause permission, initialization loading, persistence, notification, and timing effects deterministically before deletion.
 - Persistence tests prove deletion markers fence restart loading across failed cleanup, exhausted marker attempts remain unresolved, concurrent deletion converges through a deterministic marker barrier, and physical cleanup remains idempotent.
+- Tests that write persisted state redirect `XDG_DATA_HOME` to a test-owned temporary directory and remove it after execution.
 
 # Work Guidance
 

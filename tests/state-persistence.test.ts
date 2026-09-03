@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
-import test from "node:test"
-import { access, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises"
+import test, { after, before } from "node:test"
+import { access, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import {
@@ -13,8 +13,26 @@ import {
 } from "../lib/state"
 import type { Logger } from "../lib/logger"
 
-const testDataHome = join(tmpdir(), `opencode-dcp-persistence-tests-${process.pid}`)
-process.env.XDG_DATA_HOME = testDataHome
+let testDataHome = ""
+let previousDataHome: string | undefined
+
+before(async () => {
+    previousDataHome = process.env.XDG_DATA_HOME
+    testDataHome = await mkdtemp(join(tmpdir(), "opencode-dcp-persistence-tests-"))
+    process.env.XDG_DATA_HOME = testDataHome
+})
+
+after(async () => {
+    if (previousDataHome === undefined) {
+        delete process.env.XDG_DATA_HOME
+    } else {
+        process.env.XDG_DATA_HOME = previousDataHome
+    }
+
+    if (testDataHome) {
+        await rm(testDataHome, { recursive: true, force: true })
+    }
+})
 
 function storagePaths(sessionId: string) {
     const directory = join(testDataHome, "opencode", "storage", "plugin", "dcp")
