@@ -31,6 +31,7 @@ import {
 } from "./state"
 import type { CompressRangeToolArgs } from "./types"
 import { COMPRESSION_API_TIMEOUT_MS, runAbortable } from "./abort"
+import { getContextLimitStatus, validateCompressionEffectiveness } from "./effectiveness"
 
 function buildSchema() {
     return {
@@ -91,6 +92,7 @@ export function createCompressRangeTool(sharedCtx: CompressToolContext): ReturnT
                 anchorMessageId: string
                 finalSummary: string
                 consumedBlockIds: number[]
+                summaryTokens: number
             }> = []
             let totalCompressedMessages = 0
 
@@ -154,22 +156,46 @@ export function createCompressRangeTool(sharedCtx: CompressToolContext): ReturnT
                     injected.consumedBlockIds,
                 )
 
+                const nextBlockId = Number.isInteger(ctx.state.prune.messages.nextBlockId)
+                    ? Math.max(1, ctx.state.prune.messages.nextBlockId)
+                    : 1
+                const summaryTokens = countTokens(
+                    wrapCompressedSummary(nextBlockId + preparedPlans.length, completedSummary.expandedSummary),
+                )
+
                 preparedPlans.push({
                     entry: plan.entry,
                     selection: plan.selection,
                     anchorMessageId: plan.anchorMessageId,
                     finalSummary: completedSummary.expandedSummary,
                     consumedBlockIds: completedSummary.consumedBlockIds,
+                    summaryTokens,
                 })
             }
 
+            ctx.sessionGuard.assertActive()
+            try {
+                validateCompressionEffectiveness(
+                    ctx.state,
+                    ctx.config,
+                    preparedPlans.map((plan) => ({
+                        label: `${plan.entry.startId}-${plan.entry.endId}`,
+                        selection: plan.selection,
+                        summaryTokens: plan.summaryTokens,
+                        consumedBlockIds: plan.consumedBlockIds,
+                    })),
+                    getContextLimitStatus(ctx.config, ctx.state, rawMessages),
+                )
+            } catch (error) {
+                failCompression(ctx, error)
+            }
             ctx.sessionGuard.assertActive()
             const runId = allocateRunId(ctx.state)
 
             for (const preparedPlan of preparedPlans) {
                 const blockId = allocateBlockId(ctx.state)
                 const storedSummary = wrapCompressedSummary(blockId, preparedPlan.finalSummary)
-                const summaryTokens = countTokens(storedSummary)
+                const summaryTokens = preparedPlan.summaryTokens
 
                 const applied = applyCompressionState(
                     ctx.state,

@@ -29,6 +29,8 @@ export interface PersistedPrune {
 
 export interface PersistedNudges {
     contextLimitAnchors: string[]
+    contextLimitCooldown?: number
+    contextLimitLastAssistantId?: string | null
     turnNudgeAnchors?: string[]
     iterationNudgeAnchors?: string[]
 }
@@ -157,6 +159,8 @@ export async function saveSessionState(
             },
             nudges: {
                 contextLimitAnchors: Array.from(sessionState.nudges.contextLimitAnchors),
+                contextLimitCooldown: sessionState.nudges.contextLimitCooldown,
+                contextLimitLastAssistantId: sessionState.nudges.contextLimitLastAssistantId,
                 turnNudgeAnchors: Array.from(sessionState.nudges.turnNudgeAnchors),
                 iterationNudgeAnchors: Array.from(sessionState.nudges.iterationNudgeAnchors),
             },
@@ -319,6 +323,15 @@ export async function loadSessionState(
             })
         }
         state.nudges.contextLimitAnchors = dedupedAnchors
+        state.nudges.contextLimitCooldown =
+            typeof state.nudges.contextLimitCooldown === "number" &&
+            Number.isFinite(state.nudges.contextLimitCooldown)
+                ? Math.max(0, Math.floor(state.nudges.contextLimitCooldown))
+                : 0
+        state.nudges.contextLimitLastAssistantId =
+            typeof state.nudges.contextLimitLastAssistantId === "string"
+                ? state.nudges.contextLimitLastAssistantId
+                : null
 
         const rawTurnNudgeAnchors = Array.isArray(state.nudges.turnNudgeAnchors)
             ? state.nudges.turnNudgeAnchors
@@ -382,6 +395,8 @@ function emptyPersistedState(manualMode: boolean): PersistedSessionState {
         },
         nudges: {
             contextLimitAnchors: [],
+            contextLimitCooldown: 0,
+            contextLimitLastAssistantId: null,
             turnNudgeAnchors: [],
             iterationNudgeAnchors: [],
         },

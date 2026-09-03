@@ -60,6 +60,8 @@ In `range` mode, when a new compression overlaps an earlier one, the earlier sum
 
 DCP keeps mutable state isolated per OpenCode session. Compression calls for the same session are serialized through one session-specific transaction, while independent parent and subagent sessions can compress concurrently without replacing one another's state. Deleting a session aborts its pending compression work and writes a durable deletion marker before removing persisted DCP state, so stale operations and failed cleanup cannot recreate it after restart.
 
+DCP rejects compression summaries that do not reduce context. While a session remains above its effective maximum, a compression batch must recover a material share of the excess pressure, so broad older closed ranges are preferred over repeated one-message summaries. A successful emergency compression also starts the configured nudge-frequency cooldown before another context-limit reminder can appear; replaying the same message frontier does not reset or consume that cooldown.
+
 ### Deduplication
 
 Identifies repeated tool calls (same tool, same arguments) and keeps only the most recent output. Recalculated when the compress tool runs, so prompt cache is only impacted alongside compression.

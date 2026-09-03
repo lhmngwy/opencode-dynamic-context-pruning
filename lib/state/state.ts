@@ -89,6 +89,8 @@ export function createSessionState(): SessionState {
         },
         nudges: {
             contextLimitAnchors: new Set<string>(),
+            contextLimitCooldown: 0,
+            contextLimitLastAssistantId: null,
             turnNudgeAnchors: new Set<string>(),
             iterationNudgeAnchors: new Set<string>(),
         },
@@ -127,6 +129,8 @@ export function resetSessionState(state: SessionState, clearCompressionTiming = 
     }
     state.nudges = {
         contextLimitAnchors: new Set<string>(),
+        contextLimitCooldown: 0,
+        contextLimitLastAssistantId: null,
         turnNudgeAnchors: new Set<string>(),
         iterationNudgeAnchors: new Set<string>(),
     }
@@ -198,6 +202,16 @@ export async function ensureSessionInitialized(
     state.prune.tools = loadPruneMap(persisted.prune.tools)
     state.prune.messages = loadPruneMessagesState(persisted.prune.messages)
     state.nudges.contextLimitAnchors = new Set<string>(persisted.nudges.contextLimitAnchors || [])
+    state.nudges.contextLimitCooldown = Math.max(
+        0,
+        Number.isFinite(persisted.nudges.contextLimitCooldown)
+            ? Math.floor(persisted.nudges.contextLimitCooldown || 0)
+            : 0,
+    )
+    state.nudges.contextLimitLastAssistantId =
+        typeof persisted.nudges.contextLimitLastAssistantId === "string"
+            ? persisted.nudges.contextLimitLastAssistantId
+            : null
     state.nudges.turnNudgeAnchors = new Set<string>([
         ...state.nudges.turnNudgeAnchors,
         ...(persisted.nudges.turnNudgeAnchors || []),

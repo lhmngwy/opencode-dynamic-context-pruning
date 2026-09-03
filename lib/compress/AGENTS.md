@@ -10,6 +10,7 @@
 
 - The complete prepare-resolve-apply-finalize sequence runs under one session-registry lock.
 - Failed preparation releases the lock and must not allocate compression IDs or blocks.
+- Effectiveness validation runs after protected-content expansion and before ID allocation; non-positive entries and materially undersized emergency batches have no persistence or notification effects.
 - Same-session concurrent calls produce ordered, unique run and block IDs.
 - Deletion cancellation is checked before state mutation, persistence, and notification effects.
 - Permission, initialization, persistence, and notification waits observe the session disposal signal and recheck activity after asynchronous work.
@@ -20,6 +21,6 @@
 
 # Verification
 
-- Cover different-session concurrency, same-session serialization, and rejection recovery.
+- Cover different-session concurrency, same-session serialization, multi-entry effectiveness accounting, range/message pressure parity, rejection without side effects, pressure recovery, and same-key rejection recovery.
 
 # Child DOX Index

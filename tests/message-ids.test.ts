@@ -70,6 +70,9 @@ test("checkSession resets message id aliases after native compaction", async () 
     state.messageIds.byRef.set("m9998", "old-message-9998")
     state.messageIds.byRef.set("m9999", "old-message-9999")
     state.messageIds.nextRef = 9999
+    state.nudges.contextLimitAnchors.add("old-message-9999")
+    state.nudges.contextLimitCooldown = 4
+    state.nudges.contextLimitLastAssistantId = "old-message-9999"
 
     await checkSession({} as any, state, logger, messages, false)
 
@@ -77,6 +80,9 @@ test("checkSession resets message id aliases after native compaction", async () 
     assert.equal(state.messageIds.byRawId.size, 0)
     assert.equal(state.messageIds.byRef.size, 0)
     assert.equal(state.messageIds.nextRef, 1)
+    assert.equal(state.nudges.contextLimitAnchors.size, 0)
+    assert.equal(state.nudges.contextLimitCooldown, 0)
+    assert.equal(state.nudges.contextLimitLastAssistantId, null)
 
     const assigned = assignMessageRefs(state, messages)
 

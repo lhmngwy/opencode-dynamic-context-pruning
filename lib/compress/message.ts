@@ -18,6 +18,7 @@ import {
 } from "./state"
 import type { CompressMessageToolArgs } from "./types"
 import { COMPRESSION_API_TIMEOUT_MS, runAbortable } from "./abort"
+import { getContextLimitStatus, validateCompressionEffectiveness } from "./effectiveness"
 
 function buildSchema() {
     return {
@@ -82,6 +83,7 @@ export function createCompressMessageTool(sharedCtx: CompressToolContext): Retur
             const preparedPlans: Array<{
                 plan: (typeof plans)[number]
                 summaryWithTools: string
+                summaryTokens: number
             }> = []
 
             for (const plan of plans) {
@@ -112,19 +114,42 @@ export function createCompressMessageTool(sharedCtx: CompressToolContext): Retur
                 ).catch((error) => failCompression(ctx, error))
                 ctx.sessionGuard.assertActive()
 
+                const nextBlockId = Number.isInteger(ctx.state.prune.messages.nextBlockId)
+                    ? Math.max(1, ctx.state.prune.messages.nextBlockId)
+                    : 1
+                const summaryTokens = countTokens(
+                    wrapCompressedSummary(nextBlockId + preparedPlans.length, summaryWithTools),
+                )
+
                 preparedPlans.push({
                     plan,
                     summaryWithTools,
+                    summaryTokens,
                 })
             }
 
             ctx.sessionGuard.assertActive()
+            try {
+                validateCompressionEffectiveness(
+                    ctx.state,
+                    ctx.config,
+                    preparedPlans.map(({ plan, summaryTokens }) => ({
+                        label: plan.entry.messageId,
+                        selection: plan.selection,
+                        summaryTokens,
+                        consumedBlockIds: [],
+                    })),
+                    getContextLimitStatus(ctx.config, ctx.state, rawMessages),
+                )
+            } catch (error) {
+                failCompression(ctx, error)
+            }
+            ctx.sessionGuard.assertActive()
             const runId = allocateRunId(ctx.state)
 
-            for (const { plan, summaryWithTools } of preparedPlans) {
+            for (const { plan, summaryWithTools, summaryTokens } of preparedPlans) {
                 const blockId = allocateBlockId(ctx.state)
                 const storedSummary = wrapCompressedSummary(blockId, summaryWithTools)
-                const summaryTokens = countTokens(storedSummary)
 
                 applyCompressionState(
                     ctx.state,

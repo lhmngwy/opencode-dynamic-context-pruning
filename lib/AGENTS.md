@@ -14,6 +14,7 @@
 - Same-session mutations and saves use the registry critical section.
 - Events for deleted sessions resolve as benign stale input without recreating state.
 - Active event persistence uses the registry disposal guard; unrelated event failures remain observable.
+- Context-limit injection reports current pressure and observes the persisted post-compression cooldown once per distinct assistant response before creating another emergency anchor.
 
 # Work Guidance
 

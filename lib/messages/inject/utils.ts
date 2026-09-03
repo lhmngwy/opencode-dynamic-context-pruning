@@ -23,6 +23,17 @@ import { getCurrentTokenUsage } from "../../token-utils"
 import { getActiveSummaryTokenUsage } from "../../state/utils"
 
 const MESSAGE_MODE_NUDGE_PRIORITY: MessagePriority = "high"
+export const MIN_EMERGENCY_RECOVERY_TOKENS = 2048
+
+export interface ContextLimitStatus {
+    overMaxLimit: boolean
+    overMinLimit: boolean
+    currentTokens: number
+    maxContextLimit: number | undefined
+    minContextLimit: number | undefined
+    excessTokens: number
+    requiredRecoveryTokens: number
+}
 
 export interface LastUserModelContext {
     providerId: string | undefined
@@ -135,7 +146,7 @@ export function isContextOverLimits(
     providerId: string | undefined,
     modelId: string | undefined,
     messages: WithParts[],
-) {
+): ContextLimitStatus {
     const summaryTokenExtension = config.compress.summaryBuffer
         ? getActiveSummaryTokenUsage(state)
         : 0
@@ -159,7 +170,29 @@ export function isContextOverLimits(
     return {
         overMaxLimit,
         overMinLimit,
+        currentTokens,
+        maxContextLimit,
+        minContextLimit,
+        excessTokens: maxContextLimit === undefined ? 0 : Math.max(0, currentTokens - maxContextLimit),
+        requiredRecoveryTokens:
+            maxContextLimit === undefined || currentTokens <= maxContextLimit
+                ? 0
+                : Math.max(
+                      MIN_EMERGENCY_RECOVERY_TOKENS,
+                      Math.ceil((currentTokens - maxContextLimit) / 2),
+                  ),
     }
+}
+
+export function buildContextPressureGuidance(status: ContextLimitStatus): string {
+    if (!status.overMaxLimit || status.maxContextLimit === undefined) {
+        return ""
+    }
+
+    return [
+        `Current context usage is ${status.currentTokens} tokens; the effective maximum is ${status.maxContextLimit}, leaving ${status.excessTokens} tokens of excess pressure.`,
+        `Your next compression batch must recover at least ${status.requiredRecoveryTokens} pressure tokens. Select a broad oldest closed range, or multiple non-overlapping broad ranges in one call. Do not select a singleton unless it alone meets that target.`,
+    ].join("\n")
 }
 
 export function addAnchor(
@@ -327,14 +360,19 @@ export function applyAnchoredNudges(
     messages: WithParts[],
     prompts: RuntimePrompts,
     compressionPriorities?: CompressionPriorityMap,
+    contextPressureGuidance = "",
 ): void {
     const turnNudgeAnchors = collectTurnNudgeAnchors(state, config, messages)
+    const contextLimitNudge = appendGuidanceToDcpTag(
+        prompts.contextLimitNudge,
+        contextPressureGuidance,
+    )
 
     if (config.compress.mode === "message") {
         applyMessageModeAnchoredNudge(
             state.nudges.contextLimitAnchors,
             messages,
-            prompts.contextLimitNudge,
+            contextLimitNudge,
             compressionPriorities,
         )
         applyMessageModeAnchoredNudge(
@@ -356,7 +394,7 @@ export function applyAnchoredNudges(
     applyRangeModeAnchoredNudge(
         state.nudges.contextLimitAnchors,
         messages,
-        prompts.contextLimitNudge,
+        contextLimitNudge,
         compressedBlockGuidance,
     )
     applyRangeModeAnchoredNudge(

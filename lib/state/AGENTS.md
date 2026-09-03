@@ -11,6 +11,7 @@
 - A live `SessionState` belongs to one registry key and is never reused for another session.
 - Registry locks release after success or failure and do not serialize different session keys.
 - Initialization and persistence occur inside the same-session critical section.
+- Persisted nudge state includes a sanitized non-negative context-limit cooldown plus its last processed assistant response; compaction resets both.
 - Session deletion cancels queued work, removes live state, and prevents that session key from being recreated.
 - Active operations and detached initialization use the registry guard to stop commit effects after deletion is observed; disposal clears pending timing state.
 - Persisted updates use abortable temporary-file replacement. Deletion marker establishment owns bounded retries, converges across concurrent attempts, and must succeed before deletion can report success.

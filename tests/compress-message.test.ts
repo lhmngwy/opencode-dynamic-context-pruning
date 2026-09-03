@@ -99,7 +99,7 @@ function textPart(messageID: string, sessionID: string, id: string, text: string
         messageID,
         sessionID,
         type: "text" as const,
-        text,
+        text: `${text}${" realistic fixture context".repeat(100)}`,
     }
 }
 
@@ -190,6 +190,7 @@ test("compress message mode batches individual message summaries", async () => {
     const sessionID = `ses_message_compress_${Date.now()}`
     const rawMessages = buildMessages(sessionID)
     const state = createSessionState()
+    const sessions = createSessionStateRegistry([[sessionID, state]])
     const logger = new Logger(false)
     const tool = createCompressMessageTool({
         client: {
@@ -198,7 +199,7 @@ test("compress message mode batches individual message summaries", async () => {
                 get: async () => ({ data: { parentID: null } }),
             },
         },
-        sessions: createSessionStateRegistry([[sessionID, state]]),
+        sessions,
         logger,
         config: buildConfig(),
         prompts: {
@@ -259,7 +260,7 @@ test("compress message mode appends protected prompt info", async () => {
     const user = rawMessages.find((message) => message.info.id === "msg-user-1")
     const part = user?.parts[0]
     if (part?.type === "text") {
-        part.text = "Investigate the issue. <protect>Always preserve release checklist.</protect>"
+        part.text = `Investigate the issue. <protect>Always preserve release checklist.</protect>${" realistic fixture context".repeat(100)}`
     }
 
     const state = createSessionState()
@@ -599,6 +600,12 @@ test("compress message mode allows messages containing compress tool parts", asy
             time: { created: 4 },
         } as WithParts["info"],
         parts: [
+            textPart(
+                "msg-assistant-compress",
+                sessionID,
+                "compress-context-part",
+                "Earlier compression completed with these closed findings",
+            ),
             {
                 id: "compress-part",
                 messageID: "msg-assistant-compress",
@@ -966,4 +973,187 @@ test("compress message mode reports issues when every batch entry is skipped", a
     )
 
     assert.equal(state.prune.messages.blocksById.size, 0)
+})
+
+test("compress message mode rejects non-positive compression before allocating ids", async () => {
+    const sessionID = `ses_message_non_positive_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const state = createSessionState()
+    const sessions = createSessionStateRegistry([[sessionID, state]])
+    const tool = createCompressMessageTool({
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => ({ data: { parentID: null } }),
+            },
+        },
+        sessions,
+        logger: new Logger(false),
+        config: buildConfig(),
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await assert.rejects(
+        tool.execute(
+            {
+                topic: "Oversized message summary",
+                content: [
+                    {
+                        messageId: "m0002",
+                        topic: "Oversized summary",
+                        summary: "oversized summary ".repeat(1000),
+                    },
+                ],
+            },
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID,
+                messageID: "msg-compress-message-non-positive",
+            },
+        ),
+        /Compression rejected.*source=.*summary=.*net=/,
+    )
+
+    assert.equal(state.prune.messages.blocksById.size, 0)
+    assert.equal(state.prune.messages.nextRunId, 1)
+    assert.equal(state.prune.messages.nextBlockId, 1)
+    assert.equal(await sessions.runExclusive(sessionID, async () => "released"), "released")
+})
+
+test("compress message mode rejects undersized recovery and releases the session lock", async () => {
+    const sessionID = `ses_message_pressure_small_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    Object.assign(rawMessages.at(-1)?.info || {}, {
+        tokens: {
+            input: 4900,
+            output: 100,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+        },
+    })
+    const state = createSessionState()
+    const sessions = createSessionStateRegistry([[sessionID, state]])
+    const config = buildConfig()
+    config.compress.summaryBuffer = true
+    config.compress.maxContextLimit = 1000
+    const tool = createCompressMessageTool({
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => ({ data: { parentID: null } }),
+            },
+        },
+        sessions,
+        logger: new Logger(false),
+        config,
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await assert.rejects(
+        tool.execute(
+            {
+                topic: "Tiny message recovery",
+                content: [
+                    {
+                        messageId: "m0002",
+                        topic: "Small note",
+                        summary: "Captured the small note.",
+                    },
+                ],
+            },
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID,
+                messageID: "msg-compress-message-pressure-small",
+            },
+        ),
+        /pressureReduction=.*requiredRecovery=2048/,
+    )
+
+    assert.equal(state.prune.messages.blocksById.size, 0)
+    assert.equal(state.prune.messages.nextRunId, 1)
+    assert.equal(state.prune.messages.nextBlockId, 1)
+    assert.equal(await sessions.runExclusive(sessionID, async () => "released"), "released")
+})
+
+test("compress message mode accepts sufficient multi-message pressure recovery", async () => {
+    const sessionID = `ses_message_pressure_broad_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    for (const message of rawMessages.slice(1)) {
+        for (const part of message.parts) {
+            if (part.type === "text") {
+                part.text += " broad message recovery context".repeat(3000)
+            }
+        }
+    }
+    Object.assign(rawMessages.at(-1)?.info || {}, {
+        tokens: {
+            input: 4900,
+            output: 100,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+        },
+    })
+    const state = createSessionState()
+    const config = buildConfig()
+    config.compress.summaryBuffer = true
+    config.compress.maxContextLimit = 1000
+    const tool = createCompressMessageTool({
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => ({ data: { parentID: null } }),
+            },
+        },
+        sessions: createSessionStateRegistry([[sessionID, state]]),
+        logger: new Logger(false),
+        config,
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    const result = await tool.execute(
+        {
+            topic: "Broad message recovery",
+            content: [
+                {
+                    messageId: "m0002",
+                    topic: "Investigation",
+                    summary: "Captured the completed investigation.",
+                },
+                {
+                    messageId: "m0003",
+                    topic: "Follow-up",
+                    summary: "Captured the completed follow-up.",
+                },
+            ],
+        },
+        {
+            ask: async () => {},
+            metadata: () => {},
+            sessionID,
+            messageID: "msg-compress-message-pressure-broad",
+        },
+    )
+
+    assert.equal(result, "Compressed 2 messages into [Compressed conversation section].")
+    assert.equal(state.prune.messages.blocksById.size, 2)
+    assert.equal(state.prune.messages.nextRunId, 2)
+    assert.equal(state.prune.messages.nextBlockId, 3)
 })

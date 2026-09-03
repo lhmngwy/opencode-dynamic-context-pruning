@@ -102,7 +102,7 @@ function textPart(messageID: string, sessionID: string, id: string, text: string
         messageID,
         sessionID,
         type: "text" as const,
-        text,
+        text: `${text}${" realistic fixture context".repeat(100)}`,
     }
 }
 

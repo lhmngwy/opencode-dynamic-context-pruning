@@ -16,6 +16,7 @@
 - Boundary tests pause permission, initialization loading, persistence, notification, and timing effects deterministically before deletion.
 - Persistence tests prove deletion markers fence restart loading across failed cleanup, exhausted marker attempts remain unresolved, concurrent deletion converges through a deterministic marker barrier, and physical cleanup remains idempotent.
 - Tests that write persisted state redirect `XDG_DATA_HOME` to a test-owned temporary directory and remove it after execution.
+- Context-pressure tests cover replay-idempotent persisted cooldown cadence, injected recovery guidance, positive-net rejection, range/message undersized and sufficient emergency recovery, multi-entry deduplication, summary-buffer accounting, compaction reset, same-key rejection recovery, and absence of commit effects on rejection.
 
 # Work Guidance
 

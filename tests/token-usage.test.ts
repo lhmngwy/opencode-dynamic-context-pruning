@@ -2,10 +2,14 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import type { PluginConfig } from "../lib/config"
 import { isContextOverLimits } from "../lib/messages/inject/utils"
+import { buildContextPressureGuidance } from "../lib/messages/inject/utils"
+import { injectCompressNudges } from "../lib/messages/inject/inject"
 import { wrapCompressedSummary } from "../lib/compress/state"
 import { createSessionState, type WithParts } from "../lib/state"
 import type { CompressionBlock } from "../lib/state"
 import { getCurrentTokenUsage } from "../lib/token-utils"
+import { Logger } from "../lib/logger"
+import { CONTEXT_LIMIT_NUDGE } from "../lib/prompts/context-limit-nudge"
 
 function buildConfig(maxContextLimit: number, minContextLimit = 1): PluginConfig {
     return {
@@ -297,4 +301,215 @@ test("isContextOverLimits does not extend the max threshold when summaryBuffer i
     const overLimit = isContextOverLimits(config, state, undefined, undefined, messages)
 
     assert.equal(overLimit.overMaxLimit, true)
+})
+
+test("context pressure status reports excess and a bounded recovery target", () => {
+    const messages = buildCompactedMessages()
+    messages.push(buildPostCompactionAssistantMessage())
+    const state = createSessionState()
+    state.lastCompaction = 2
+    const status = isContextOverLimits(buildConfig(1000, 500), state, undefined, undefined, messages)
+
+    assert.equal(status.currentTokens, 3450)
+    assert.equal(status.maxContextLimit, 1000)
+    assert.equal(status.excessTokens, 2450)
+    assert.equal(status.requiredRecoveryTokens, 2048)
+    assert.match(buildContextPressureGuidance(status), /recover at least 2048 pressure tokens/)
+    assert.match(buildContextPressureGuidance(status), /Do not select a singleton/)
+})
+
+test("successful over-limit compression observes the configured nudge cooldown", async () => {
+    const sessionID = "ses_context_limit_cooldown"
+    const state = createSessionState()
+    const config = buildConfig(1000, 500)
+    const user: WithParts = {
+        info: {
+            id: "msg-user",
+            role: "user",
+            sessionID,
+            agent: "assistant",
+            model: { providerID: "anthropic", modelID: "claude-test" },
+            time: { created: 1 },
+        } as WithParts["info"],
+        parts: [textPart("msg-user", sessionID, "user-part", "Start")],
+    }
+    const compressAssistant: WithParts = {
+        info: {
+            id: "msg-compress",
+            role: "assistant",
+            sessionID,
+            agent: "assistant",
+            time: { created: 2 },
+            tokens: {
+                input: 3000,
+                output: 100,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+            },
+        } as WithParts["info"],
+        parts: [
+            {
+                id: "compress-part",
+                messageID: "msg-compress",
+                sessionID,
+                type: "tool",
+                tool: "compress",
+                callID: "compress-call",
+                state: { status: "completed", input: {}, output: "done" },
+            } as WithParts["parts"][number],
+        ],
+    }
+    const messages = [user, compressAssistant]
+    const prompts = {
+        contextLimitNudge: CONTEXT_LIMIT_NUDGE,
+        turnNudge: "",
+        iterationNudge: "",
+    } as any
+    let saves = 0
+    const persistState = async () => {
+        saves++
+    }
+
+    await injectCompressNudges(
+        state,
+        config,
+        new Logger(false),
+        messages,
+        prompts,
+        undefined,
+        persistState,
+    )
+    assert.equal(state.nudges.contextLimitCooldown, 5)
+    assert.equal(state.nudges.contextLimitLastAssistantId, "msg-compress")
+    assert.equal(saves, 1)
+
+    await injectCompressNudges(
+        state,
+        config,
+        new Logger(false),
+        messages,
+        prompts,
+        undefined,
+        persistState,
+    )
+    assert.equal(state.nudges.contextLimitCooldown, 5)
+    assert.equal(saves, 1)
+
+    for (let index = 1; index <= 5; index++) {
+        const messageID = `msg-assistant-${index}`
+        messages.push({
+            info: {
+                id: messageID,
+                role: "assistant",
+                sessionID,
+                agent: "assistant",
+                time: { created: index + 2 },
+                tokens: {
+                    input: 3000,
+                    output: 100,
+                    reasoning: 0,
+                    cache: { read: 0, write: 0 },
+                },
+            } as WithParts["info"],
+            parts: [textPart(messageID, sessionID, `${messageID}-part`, "Continue")],
+        })
+        await injectCompressNudges(
+            state,
+            config,
+            new Logger(false),
+            messages,
+            prompts,
+            undefined,
+            persistState,
+        )
+
+        if (index < 5) {
+            assert.equal(state.nudges.contextLimitAnchors.size, 0)
+            assert.equal(state.nudges.contextLimitCooldown, 5 - index)
+        }
+
+        const cooldown = state.nudges.contextLimitCooldown
+        const saveCount = saves
+        await injectCompressNudges(
+            state,
+            config,
+            new Logger(false),
+            messages,
+            prompts,
+            undefined,
+            persistState,
+        )
+        assert.equal(state.nudges.contextLimitCooldown, cooldown)
+        assert.equal(saves, saveCount)
+    }
+
+    assert.equal(state.nudges.contextLimitCooldown, 0)
+    assert.deepEqual(Array.from(state.nudges.contextLimitAnchors), ["msg-assistant-5"])
+    assert.match((messages.at(-1)?.parts[0] as { text: string }).text, /Current context usage is 3100/)
+    assert.match((messages.at(-1)?.parts[0] as { text: string }).text, /effective maximum is 1000/)
+    assert.match((messages.at(-1)?.parts[0] as { text: string }).text, /2100 tokens of excess/)
+    assert.match((messages.at(-1)?.parts[0] as { text: string }).text, /recover at least 2048/)
+
+    const reloaded = createSessionState()
+    reloaded.nudges.contextLimitCooldown = state.nudges.contextLimitCooldown
+    reloaded.nudges.contextLimitLastAssistantId = state.nudges.contextLimitLastAssistantId
+    reloaded.nudges.contextLimitAnchors = new Set(state.nudges.contextLimitAnchors)
+    await injectCompressNudges(
+        reloaded,
+        config,
+        new Logger(false),
+        messages,
+        prompts,
+        undefined,
+        persistState,
+    )
+    assert.equal(saves, 6)
+    assert.deepEqual(Array.from(reloaded.nudges.contextLimitAnchors), ["msg-assistant-5"])
+
+    messages.push({
+        info: {
+            id: "msg-assistant-under-limit",
+            role: "assistant",
+            sessionID,
+            agent: "assistant",
+            time: { created: 8 },
+            tokens: {
+                input: 100,
+                output: 50,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+            },
+        } as WithParts["info"],
+        parts: [
+            textPart(
+                "msg-assistant-under-limit",
+                sessionID,
+                "msg-assistant-under-limit-part",
+                "Recovered",
+            ),
+        ],
+    })
+    await injectCompressNudges(
+        state,
+        config,
+        new Logger(false),
+        messages,
+        prompts,
+        undefined,
+        persistState,
+    )
+
+    assert.equal(state.nudges.contextLimitCooldown, 0)
+    assert.equal(state.nudges.contextLimitAnchors.size, 0)
+    const saveCount = saves
+    await injectCompressNudges(
+        state,
+        config,
+        new Logger(false),
+        messages,
+        prompts,
+        undefined,
+        persistState,
+    )
+    assert.equal(saves, saveCount)
 })

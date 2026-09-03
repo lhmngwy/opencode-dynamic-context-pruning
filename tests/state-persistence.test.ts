@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test, { after, before } from "node:test"
-import { access, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import {
@@ -248,5 +248,40 @@ test("concurrent deletion attempts converge on one durable fence", async () => {
     const remaining = await readdir(paths.directory)
     assert.equal(remaining.some((name) => name.includes(`${sessionID}.json.deleted.`)), false)
 
+    await rm(testDataHome, { recursive: true, force: true })
+})
+
+test("context limit cooldown and response cursor survive persistence", async () => {
+    const sessionID = `session-context-cooldown-${Date.now()}`
+    const state = createSessionState()
+    state.sessionId = sessionID
+    state.nudges.contextLimitCooldown = 4
+    state.nudges.contextLimitLastAssistantId = "msg-assistant-4"
+    const logger = {
+        info() {},
+        debug() {},
+        error() {},
+        warn() {},
+    } as unknown as Logger
+
+    await saveSessionState(state, logger)
+    const persisted = await loadSessionState(sessionID, logger)
+
+    assert.equal(persisted?.nudges.contextLimitCooldown, 4)
+    assert.equal(persisted?.nudges.contextLimitLastAssistantId, "msg-assistant-4")
+
+    const paths = storagePaths(sessionID)
+    const legacy = JSON.parse(await readFile(paths.file, "utf-8"))
+    delete legacy.nudges.contextLimitCooldown
+    delete legacy.nudges.contextLimitLastAssistantId
+    await writeFile(paths.file, JSON.stringify(legacy), "utf-8")
+    assert.equal((await loadSessionState(sessionID, logger))?.nudges.contextLimitCooldown, 0)
+    assert.equal((await loadSessionState(sessionID, logger))?.nudges.contextLimitLastAssistantId, null)
+
+    legacy.nudges.contextLimitCooldown = "invalid"
+    legacy.nudges.contextLimitLastAssistantId = 42
+    await writeFile(paths.file, JSON.stringify(legacy), "utf-8")
+    assert.equal((await loadSessionState(sessionID, logger))?.nudges.contextLimitCooldown, 0)
+    assert.equal((await loadSessionState(sessionID, logger))?.nudges.contextLimitLastAssistantId, null)
     await rm(testDataHome, { recursive: true, force: true })
 })

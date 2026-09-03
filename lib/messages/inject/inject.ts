@@ -22,6 +22,7 @@ import {
 import {
     addAnchor,
     applyAnchoredNudges,
+    buildContextPressureGuidance,
     countMessagesAfterIndex,
     findLastNonIgnoredMessage,
     getIterationNudgeThreshold,
@@ -37,6 +38,7 @@ export const injectCompressNudges = async (
     messages: WithParts[],
     prompts: RuntimePrompts,
     compressionPriorities?: CompressionPriorityMap,
+    persistState: typeof saveSessionState = saveSessionState,
 ): Promise<void> => {
     if (compressPermission(state, config) === "deny") {
         return
@@ -49,24 +51,33 @@ export const injectCompressNudges = async (
     const lastMessage = findLastNonIgnoredMessage(messages)
     const lastAssistantMessage = messages.findLast((message) => message.info.role === "assistant")
 
-    if (lastAssistantMessage && messageHasCompress(lastAssistantMessage)) {
-        state.nudges.contextLimitAnchors.clear()
-        state.nudges.turnNudgeAnchors.clear()
-        state.nudges.iterationNudgeAnchors.clear()
-        await saveSessionState(state, logger)
-        return
-    }
-
     const { providerId, modelId } = getModelInfo(messages)
     let anchorsChanged = false
 
-    const { overMaxLimit, overMinLimit } = isContextOverLimits(
+    const contextStatus = isContextOverLimits(
         config,
         state,
         providerId,
         modelId,
         messages,
     )
+    const { overMaxLimit, overMinLimit } = contextStatus
+    const lastAssistantId = lastAssistantMessage?.info.id ?? null
+    const isNewAssistant =
+        lastAssistantId !== null && lastAssistantId !== state.nudges.contextLimitLastAssistantId
+
+    if (lastAssistantMessage && messageHasCompress(lastAssistantMessage)) {
+        if (!isNewAssistant) {
+            return
+        }
+        state.nudges.contextLimitAnchors.clear()
+        state.nudges.contextLimitCooldown = overMaxLimit ? getNudgeFrequency(config) : 0
+        state.nudges.contextLimitLastAssistantId = lastAssistantId
+        state.nudges.turnNudgeAnchors.clear()
+        state.nudges.iterationNudgeAnchors.clear()
+        await persistState(state, logger)
+        return
+    }
 
     if (!overMinLimit) {
         const hadTurnAnchors = state.nudges.turnNudgeAnchors.size > 0
@@ -80,7 +91,13 @@ export const injectCompressNudges = async (
     }
 
     if (overMaxLimit) {
-        if (lastMessage) {
+        if (state.nudges.contextLimitCooldown > 0 && isNewAssistant) {
+            state.nudges.contextLimitCooldown--
+            state.nudges.contextLimitLastAssistantId = lastAssistantId
+            anchorsChanged = true
+        }
+
+        if (state.nudges.contextLimitCooldown === 0 && lastMessage) {
             const interval = getNudgeFrequency(config)
             const added = addAnchor(
                 state.nudges.contextLimitAnchors,
@@ -93,7 +110,20 @@ export const injectCompressNudges = async (
                 anchorsChanged = true
             }
         }
-    } else if (overMinLimit) {
+    } else {
+        if (
+            state.nudges.contextLimitAnchors.size > 0 ||
+            state.nudges.contextLimitCooldown > 0 ||
+            state.nudges.contextLimitLastAssistantId !== null
+        ) {
+            state.nudges.contextLimitAnchors.clear()
+            state.nudges.contextLimitCooldown = 0
+            state.nudges.contextLimitLastAssistantId = null
+            anchorsChanged = true
+        }
+    }
+
+    if (!overMaxLimit && overMinLimit) {
         const isLastMessageUser = lastMessage?.message.info.role === "user"
 
         if (isLastMessageUser && lastAssistantMessage) {
@@ -135,10 +165,17 @@ export const injectCompressNudges = async (
         }
     }
 
-    applyAnchoredNudges(state, config, messages, prompts, compressionPriorities)
+    applyAnchoredNudges(
+        state,
+        config,
+        messages,
+        prompts,
+        compressionPriorities,
+        buildContextPressureGuidance(contextStatus),
+    )
 
     if (anchorsChanged) {
-        await saveSessionState(state, logger)
+        await persistState(state, logger)
     }
 }
 

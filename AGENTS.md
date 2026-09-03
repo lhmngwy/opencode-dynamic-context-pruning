@@ -12,6 +12,8 @@
 - Mutable runtime state is owned by exactly one OpenCode session for its lifetime.
 - Operations for the same session serialize through the session registry; operations for different sessions remain concurrent.
 - Compression preparation, resolution, mutation, and persistence execute as one same-session critical section.
+- Compression commits only when every summary reduces context; above the effective maximum, a batch must recover material context pressure before IDs or state are mutated.
+- Successful emergency compression preserves the configured nudge cadence through a persisted cooldown keyed to distinct assistant responses, so replayed frontiers are idempotent.
 - Persisted state must never be written under a different session identity.
 - Session deletion invalidates active and queued work before further state, persistence, or notification commits.
 - Deletion aborts pending session operations and persists a deletion fence before best-effort physical cleanup so stale state cannot replay after restart.
