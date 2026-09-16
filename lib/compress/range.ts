@@ -3,6 +3,7 @@ import type { CompressToolContext, ToolContext } from "./types"
 import { countTokens } from "../token-utils"
 import { RANGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
 import {
+    assertPinnedMessagesUnchanged,
     failCompression,
     finalizeSession,
     prepareSession,
@@ -77,11 +78,12 @@ export function createCompressRangeTool(sharedCtx: CompressToolContext): ReturnT
                     ? (toolCtx as unknown as { callID: string }).callID
                     : undefined
 
-            const { rawMessages, searchContext, signal } = await prepareSession(
+            const preparedSession = await prepareSession(
                 ctx,
                 toolCtx,
                 `Compress Range: ${input.topic}`,
             )
+            const { rawMessages, searchContext, signal } = preparedSession
             const resolvedPlans = resolveRanges(input, searchContext, ctx.state)
             validateNonOverlapping(resolvedPlans)
 
@@ -190,6 +192,7 @@ export function createCompressRangeTool(sharedCtx: CompressToolContext): ReturnT
                 failCompression(ctx, error)
             }
             ctx.sessionGuard.assertActive()
+            await assertPinnedMessagesUnchanged(ctx, toolCtx, preparedSession)
             const runId = allocateRunId(ctx.state)
 
             for (const preparedPlan of preparedPlans) {

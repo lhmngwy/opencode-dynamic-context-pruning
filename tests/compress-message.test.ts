@@ -254,6 +254,294 @@ test("compress message mode batches individual message summaries", async () => {
     assert.match(blocks[1]?.summary || "", /task output body/)
 })
 
+test("compress message mode aborts before ID allocation when pins change", async () => {
+    const sessionID = `ses_message_pin_drift_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const target = rawMessages.find((message) => message.info.id === "msg-assistant-1")
+    const targetText = target?.parts[0]
+    if (targetText?.type === "text") {
+        targetText.text = "Detailed implementation evidence. ".repeat(300)
+    }
+
+    const state = createSessionState()
+    let getCalls = 0
+    const tool = createCompressMessageTool({
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => {
+                    getCalls += 1
+                    return {
+                        data: {
+                            parentID: null,
+                            metadata:
+                                getCalls >= 3
+                                    ? {
+                                          openchamber: {
+                                              context_obligatory_messages: [
+                                                  {
+                                                      id: "msg-assistant-1",
+                                                      createdAt: 2,
+                                                      role: "assistant",
+                                                  },
+                                              ],
+                                          },
+                                      }
+                                    : {},
+                        },
+                    }
+                },
+            },
+        },
+        sessions: createSessionStateRegistry([[sessionID, state]]),
+        logger: new Logger(false),
+        config: buildConfig(),
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await assert.rejects(
+        tool.execute(
+            {
+                topic: "Stale pin snapshot",
+                content: [
+                    {
+                        messageId: "m0002",
+                        topic: "Implementation evidence",
+                        summary: "The implementation evidence was recorded.",
+                    },
+                ],
+            },
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID,
+                messageID: "msg-compress-pin-drift",
+            },
+        ),
+        /Pinned messages changed during compression/,
+    )
+
+    assert.equal(getCalls, 3)
+    assert.equal(state.prune.messages.blocksById.size, 0)
+    assert.equal(state.prune.messages.nextBlockId, 1)
+    assert.equal(state.prune.messages.nextRunId, 1)
+})
+
+test("compress message mode fails closed on a resolved metadata error during preparation", async () => {
+    const sessionID = `ses_message_pin_initial_error_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const state = createSessionState()
+    let getCalls = 0
+    let persistenceCalls = 0
+    let notificationCalls = 0
+    const tool = createCompressMessageTool({
+        client: {
+            tui: {
+                showToast: async () => {
+                    notificationCalls += 1
+                },
+            },
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                prompt: async () => {
+                    notificationCalls += 1
+                },
+                get: async () => {
+                    getCalls += 1
+                    return getCalls === 1
+                        ? { data: { parentID: null } }
+                        : { data: undefined, error: { status: 503 } }
+                },
+            },
+        },
+        sessions: createSessionStateRegistry([[sessionID, state]]),
+        logger: new Logger(false),
+        config: buildConfig(),
+        saveSessionState: async () => {
+            persistenceCalls += 1
+        },
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await assert.rejects(
+        tool.execute(
+            {
+                topic: "Unavailable pin metadata",
+                content: [
+                    {
+                        messageId: "m0002",
+                        topic: "Implementation evidence",
+                        summary: "This must not be applied.",
+                    },
+                ],
+            },
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID,
+                messageID: "msg-compress-pin-initial-error",
+            },
+        ),
+        /Unable to load pinned-message metadata/,
+    )
+
+    assert.equal(getCalls, 2)
+    assert.equal(state.prune.messages.blocksById.size, 0)
+    assert.equal(state.prune.messages.nextBlockId, 1)
+    assert.equal(state.prune.messages.nextRunId, 1)
+    assert.equal(persistenceCalls, 0)
+    assert.equal(notificationCalls, 0)
+})
+
+test("compress message mode fails closed on a resolved metadata error before commit", async () => {
+    const sessionID = `ses_message_pin_revalidation_error_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const target = rawMessages.find((message) => message.info.id === "msg-assistant-1")
+    const targetText = target?.parts[0]
+    if (targetText?.type === "text") {
+        targetText.text = "Detailed implementation evidence. ".repeat(300)
+    }
+
+    const state = createSessionState()
+    let getCalls = 0
+    let persistenceCalls = 0
+    let notificationCalls = 0
+    const tool = createCompressMessageTool({
+        client: {
+            tui: {
+                showToast: async () => {
+                    notificationCalls += 1
+                },
+            },
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                prompt: async () => {
+                    notificationCalls += 1
+                },
+                get: async () => {
+                    getCalls += 1
+                    return getCalls < 3
+                        ? { data: { parentID: null, metadata: {} } }
+                        : { data: undefined, error: { status: 500 } }
+                },
+            },
+        },
+        sessions: createSessionStateRegistry([[sessionID, state]]),
+        logger: new Logger(false),
+        config: buildConfig(),
+        saveSessionState: async () => {
+            persistenceCalls += 1
+        },
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await assert.rejects(
+        tool.execute(
+            {
+                topic: "Unavailable pin revalidation",
+                content: [
+                    {
+                        messageId: "m0002",
+                        topic: "Implementation evidence",
+                        summary: "This must not be applied.",
+                    },
+                ],
+            },
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID,
+                messageID: "msg-compress-pin-revalidation-error",
+            },
+        ),
+        /Unable to load pinned-message metadata/,
+    )
+
+    assert.equal(getCalls, 3)
+    assert.equal(state.prune.messages.blocksById.size, 0)
+    assert.equal(state.prune.messages.nextBlockId, 1)
+    assert.equal(state.prune.messages.nextRunId, 1)
+    assert.equal(persistenceCalls, 0)
+    assert.equal(notificationCalls, 0)
+})
+
+test("compress message mode reports pinned messages as skipped", async () => {
+    const sessionID = `ses_message_pinned_${Date.now()}`
+    const rawMessages = buildMessages(sessionID)
+    const state = createSessionState()
+    const tool = createCompressMessageTool({
+        client: {
+            session: {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => ({
+                    data: {
+                        parentID: null,
+                        metadata: {
+                            openchamber: {
+                                context_obligatory_messages: [
+                                    {
+                                        id: "msg-assistant-1",
+                                        createdAt: 2,
+                                        role: "assistant",
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                }),
+            },
+        },
+        sessions: createSessionStateRegistry([[sessionID, state]]),
+        logger: new Logger(false),
+        config: buildConfig(),
+        prompts: {
+            reload() {},
+            getRuntimePrompts() {
+                return { compressMessage: "", compressRange: "" }
+            },
+        },
+    } as any)
+
+    await assert.rejects(
+        tool.execute(
+            {
+                topic: "Pinned message",
+                content: [
+                    {
+                        messageId: "m0002",
+                        topic: "Pinned evidence",
+                        summary: "This must not be applied.",
+                    },
+                ],
+            },
+            {
+                ask: async () => {},
+                metadata: () => {},
+                sessionID,
+                messageID: "msg-compress-pinned",
+            },
+        ),
+        /messageId m0002 refers to an OpenChamber pinned message/,
+    )
+
+    assert.equal(state.prune.messages.blocksById.size, 0)
+})
+
 test("compress message mode appends protected prompt info", async () => {
     const sessionID = `ses_message_protect_tag_${Date.now()}`
     const rawMessages = buildMessages(sessionID)

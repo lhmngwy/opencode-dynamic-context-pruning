@@ -269,7 +269,7 @@ test("chat message transform caches an isolated pre-prune snapshot", async () =>
     config.strategies.purgeErrors.enabled = false
     const messageCache = new Map<string, WithParts[]>()
     const handler = createChatMessageTransformHandler(
-        {},
+        { session: { get: async () => ({ data: {} }) } } as any,
         createSessionStateRegistry([["session-1", state]]),
         new Logger(false),
         config,
@@ -323,6 +323,78 @@ test("chat message transform caches an isolated pre-prune snapshot", async () =>
         (messageCache.get("session-1")?.[1]?.parts[0] as any).state.output,
         "original large output",
     )
+})
+
+test("chat message transform skips pruning when pin metadata is unavailable", async () => {
+    const state = createSessionState()
+    state.sessionId = "session-1"
+    state.prune.tools.set("call-1", 100)
+    const config = buildConfig("deny")
+    config.strategies.deduplication.enabled = false
+    config.strategies.purgeErrors.enabled = false
+    const logger = new Logger(false)
+    const warnings: string[] = []
+    logger.warn = ((message: string) => {
+        warnings.push(message)
+        return Promise.resolve()
+    }) as typeof logger.warn
+    const handler = createChatMessageTransformHandler(
+        {
+            session: {
+                get: async () => ({ data: undefined, error: { status: 503 } }),
+            },
+        } as any,
+        createSessionStateRegistry([["session-1", state]]),
+        logger,
+        config,
+        {
+            reload() {},
+            getRuntimePrompts() {
+                return {} as any
+            },
+        } as any,
+        { global: undefined, agents: {} },
+    )
+    const output = {
+        messages: [
+            {
+                ...buildMessage("user-1", "user", "request"),
+                info: {
+                    ...buildMessage("user-1", "user", "request").info,
+                    model: { providerID: "openai", modelID: "test-model" },
+                },
+            },
+            {
+                info: {
+                    id: "assistant-1",
+                    role: "assistant",
+                    sessionID: "session-1",
+                    model: { providerID: "openai", modelID: "test-model" },
+                    time: { created: 2 },
+                },
+                parts: [
+                    {
+                        id: "tool-1",
+                        messageID: "assistant-1",
+                        sessionID: "session-1",
+                        type: "tool",
+                        callID: "call-1",
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { filePath: "/tmp/example" },
+                            output: "original large output",
+                        },
+                    },
+                ],
+            } as WithParts,
+        ],
+    }
+
+    await handler({}, output)
+
+    assert.equal((output.messages[1]?.parts[0] as any).state.output, "original large output")
+    assert.deepEqual(warnings, ["Skipping DCP pruning because pinned messages could not be loaded"])
 })
 
 test("chat message transform drops messages without info instead of crashing", async () => {

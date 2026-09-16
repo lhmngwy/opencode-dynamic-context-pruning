@@ -16,18 +16,27 @@ export const prune = (
     logger: Logger,
     config: PluginConfig,
     messages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string> = new Set(),
 ): void => {
-    filterCompressedRanges(state, logger, config, messages)
-    // pruneFullTool(state, logger, messages)
-    pruneToolOutputs(state, logger, messages)
-    pruneToolInputs(state, logger, messages)
-    pruneToolErrors(state, logger, messages)
+    filterCompressedRanges(state, logger, config, messages, pinnedMessageIds)
+    // pruneFullTool(state, logger, messages, pinnedMessageIds)
+    pruneToolOutputs(state, logger, messages, pinnedMessageIds)
+    pruneToolInputs(state, logger, messages, pinnedMessageIds)
+    pruneToolErrors(state, logger, messages, pinnedMessageIds)
 }
 
-const pruneFullTool = (state: SessionState, logger: Logger, messages: WithParts[]): void => {
+const pruneFullTool = (
+    state: SessionState,
+    logger: Logger,
+    messages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string>,
+): void => {
     const messagesToRemove: string[] = []
 
     for (const msg of messages) {
+        if (pinnedMessageIds.has(msg.info.id)) {
+            continue
+        }
         if (isMessageCompacted(state, msg)) {
             continue
         }
@@ -70,8 +79,16 @@ const pruneFullTool = (state: SessionState, logger: Logger, messages: WithParts[
     }
 }
 
-const pruneToolOutputs = (state: SessionState, logger: Logger, messages: WithParts[]): void => {
+const pruneToolOutputs = (
+    state: SessionState,
+    logger: Logger,
+    messages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string>,
+): void => {
     for (const msg of messages) {
+        if (pinnedMessageIds.has(msg.info.id)) {
+            continue
+        }
         if (isMessageCompacted(state, msg)) {
             continue
         }
@@ -96,8 +113,16 @@ const pruneToolOutputs = (state: SessionState, logger: Logger, messages: WithPar
     }
 }
 
-const pruneToolInputs = (state: SessionState, logger: Logger, messages: WithParts[]): void => {
+const pruneToolInputs = (
+    state: SessionState,
+    logger: Logger,
+    messages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string>,
+): void => {
     for (const msg of messages) {
+        if (pinnedMessageIds.has(msg.info.id)) {
+            continue
+        }
         if (isMessageCompacted(state, msg)) {
             continue
         }
@@ -125,8 +150,16 @@ const pruneToolInputs = (state: SessionState, logger: Logger, messages: WithPart
     }
 }
 
-const pruneToolErrors = (state: SessionState, logger: Logger, messages: WithParts[]): void => {
+const pruneToolErrors = (
+    state: SessionState,
+    logger: Logger,
+    messages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string>,
+): void => {
     for (const msg of messages) {
+        if (pinnedMessageIds.has(msg.info.id)) {
+            continue
+        }
         if (isMessageCompacted(state, msg)) {
             continue
         }
@@ -161,6 +194,7 @@ const filterCompressedRanges = (
     logger: Logger,
     config: PluginConfig,
     messages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string>,
 ): void => {
     if (
         state.prune.messages.byMessageId.size === 0 &&
@@ -219,7 +253,11 @@ const filterCompressedRanges = (
 
         // Skip messages that are in the prune list
         const pruneEntry = state.prune.messages.byMessageId.get(msgId)
-        if (pruneEntry && pruneEntry.activeBlockIds.length > 0) {
+        if (
+            !pinnedMessageIds.has(msgId) &&
+            pruneEntry &&
+            pruneEntry.activeBlockIds.length > 0
+        ) {
             continue
         }
 

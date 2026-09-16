@@ -62,6 +62,12 @@ DCP keeps mutable state isolated per OpenCode session. Compression calls for the
 
 DCP rejects compression summaries that do not reduce context. While a session remains above its effective maximum, a compression batch must recover a material share of the excess pressure, so broad older closed ranges are preferred over repeated one-message summaries. A successful emergency compression also starts the configured nudge-frequency cooldown before another context-limit reminder can appear; replaying the same message frontier does not reset or consume that cooldown.
 
+### OpenChamber Pinned Messages
+
+DCP automatically honors messages pinned in OpenChamber. A pinned message remains in its original raw form, including assistant tool calls, outputs, inputs, and errors, and is excluded from compression token accounting. Pinning a message that was compressed earlier makes its raw content visible on the next transform; unpinning it lets the existing DCP compression state apply again.
+
+DCP reads the current pin metadata before pruning and revalidates it immediately before committing a compression. If the metadata cannot be read, DCP skips pruning or rejects the compression rather than risk removing a pinned message. If pins change while a compression is being prepared, the compression is rejected without allocating or persisting a partial block and can be retried against the current context. A summary created before a message was pinned may still mention that message even though the raw pinned message is also retained.
+
 ### Deduplication
 
 Identifies repeated tool calls (same tool, same arguments) and keeps only the most recent output. Recalculated when the compress tool runs, so prompt cache is only impacted alongside compression.

@@ -15,6 +15,7 @@
 - Events for deleted sessions resolve as benign stale input without recreating state.
 - Active event persistence uses the registry disposal guard; unrelated event failures remain observable.
 - Context-limit injection reports current pressure and observes the persisted post-compression cooldown once per distinct assistant response before creating another emergency anchor.
+- OpenChamber pin metadata is a fail-closed runtime input: unsuccessful session reads skip DCP pruning, while successful reads preserve every currently pinned raw message and all of its tool parts.
 
 # Work Guidance
 

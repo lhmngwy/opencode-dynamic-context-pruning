@@ -62,6 +62,7 @@ export interface SearchContext {
     rawMessagesById: Map<string, WithParts>
     rawIndexById: Map<string, number>
     summaryByBlockId: Map<number, CompressionBlock>
+    pinnedMessageIds: ReadonlySet<string>
 }
 
 export interface SelectionResolution {

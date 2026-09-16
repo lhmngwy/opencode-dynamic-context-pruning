@@ -24,7 +24,7 @@ test("prepareSession stops waiting for an explicitly requested permission when c
 
     const preparation = prepareSession(
         {
-            client: {},
+            client: { session: { get: async () => ({ data: {} }) } },
             state,
             logger: new Logger(false),
             config: {
@@ -55,7 +55,7 @@ test("prepareSession does not re-enter the host permission API when compression 
 
     await prepareSession(
         {
-            client: {},
+            client: { session: { get: async () => ({ data: {} }) } },
             state,
             logger: new Logger(false),
             config: {
@@ -133,6 +133,7 @@ test("prepareSession uses the transformed message cache without re-entering the 
         {
             client: {
                 session: {
+                    get: async () => ({ data: {} }),
                     messages: async () => {
                         sessionFetches += 1
                         return new Promise<never>(() => {})

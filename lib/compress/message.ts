@@ -4,6 +4,7 @@ import { countTokens } from "../token-utils"
 import { MESSAGE_FORMAT_EXTENSION } from "../prompts/extensions/tool"
 import { formatIssues, formatResult, resolveMessages, validateArgs } from "./message-utils"
 import {
+    assertPinnedMessagesUnchanged,
     failCompression,
     finalizeSession,
     prepareSession,
@@ -62,11 +63,12 @@ export function createCompressMessageTool(sharedCtx: CompressToolContext): Retur
                     ? (toolCtx as unknown as { callID: string }).callID
                     : undefined
 
-            const { rawMessages, searchContext, signal } = await prepareSession(
+            const preparedSession = await prepareSession(
                 ctx,
                 toolCtx,
                 `Compress Message: ${input.topic}`,
             )
+            const { rawMessages, searchContext, signal } = preparedSession
             const { plans, skippedIssues, skippedCount } = resolveMessages(
                 input,
                 searchContext,
@@ -145,6 +147,7 @@ export function createCompressMessageTool(sharedCtx: CompressToolContext): Retur
                 failCompression(ctx, error)
             }
             ctx.sessionGuard.assertActive()
+            await assertPinnedMessagesUnchanged(ctx, toolCtx, preparedSession)
             const runId = allocateRunId(ctx.state)
 
             for (const { plan, summaryWithTools, summaryTokens } of preparedPlans) {

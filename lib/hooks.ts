@@ -45,6 +45,7 @@ import { type HostPermissionSnapshot } from "./host-permissions"
 import { compressPermission, syncCompressPermissionState } from "./compress-permission"
 import { checkSession, ensureSessionInitialized, saveSessionState, syncToolCache } from "./state"
 import { cacheSystemPromptTokens } from "./ui/utils"
+import { loadContextObligatoryMessageIds } from "./messages/context-obligatory"
 
 const INTERNAL_AGENT_SIGNATURES = [
     "You are a title generator",
@@ -165,7 +166,21 @@ export function createChatMessageTransformHandler(
             messageCache.delete(messageSessionId)
             messageCache.set(messageSessionId, structuredClone(output.messages))
         }
-        prune(state, logger, config, output.messages)
+        try {
+            const pinnedMessageIds = await loadContextObligatoryMessageIds(
+                client,
+                messageSessionId,
+                guard.signal,
+            )
+            guard.assertActive()
+            prune(state, logger, config, output.messages, pinnedMessageIds)
+        } catch (error: any) {
+            guard.assertActive()
+            logger.warn("Skipping DCP pruning because pinned messages could not be loaded", {
+                sessionId: messageSessionId,
+                error: error instanceof Error ? error.message : String(error),
+            })
+        }
         await injectExtendedSubAgentResults(
             client,
             state,

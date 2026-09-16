@@ -101,6 +101,10 @@ const ISSUE_TEMPLATES: Record<string, [singular: string, plural: string]> = {
         "refers to a protected message and cannot be compressed.",
         "refer to protected messages and cannot be compressed.",
     ],
+    pinned: [
+        "refers to an OpenChamber pinned message and cannot be compressed.",
+        "refer to OpenChamber pinned messages and cannot be compressed.",
+    ],
     "already-compressed": [
         "is already part of an active compression.",
         "are already part of active compressions.",
@@ -219,6 +223,10 @@ function resolveMessage(
         isIgnoredUserMessage(rawMessage)
     ) {
         throw new SoftIssue("not-in-context", parsed.ref, "not in context")
+    }
+
+    if (searchContext.pinnedMessageIds.has(messageId)) {
+        throw new SoftIssue("pinned", parsed.ref, "pinned message")
     }
 
     const { startReference, endReference } = resolveBoundaryIds(

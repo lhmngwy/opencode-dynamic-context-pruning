@@ -3,6 +3,10 @@ import { ensureSessionInitialized, refreshManualMode } from "../state"
 import { saveSessionState } from "../state/persistence"
 import { assignMessageRefs } from "../message-ids"
 import { isIgnoredUserMessage } from "../messages/query"
+import {
+    contextObligatoryMessageIdsEqual,
+    loadContextObligatoryMessageIds,
+} from "../messages/context-obligatory"
 import { compressPermission } from "../compress-permission"
 import { deduplicate, purgeErrors } from "../strategies"
 import { getCurrentParams, getCurrentTokenUsage } from "../token-utils"
@@ -39,6 +43,7 @@ export interface NotificationEntry {
 export interface PreparedSession {
     rawMessages: WithParts[]
     searchContext: SearchContext
+    pinnedMessageIds: ReadonlySet<string>
     signal: readonly AbortSignal[]
 }
 
@@ -129,13 +134,45 @@ export async function prepareSession(
     ctx.sessionGuard?.assertActive()
     assignMessageRefs(ctx.state, rawMessages)
 
+    const pinnedMessageIds = await runAbortable(
+        (requestSignal) =>
+            loadContextObligatoryMessageIds(ctx.client, toolCtx.sessionID, requestSignal),
+        signal,
+        "Loading pinned messages for compression",
+        COMPRESSION_API_TIMEOUT_MS,
+    ).catch((error) => failCompression(ctx, error))
+    ctx.sessionGuard?.assertActive()
+
     deduplicate(ctx.state, ctx.logger, ctx.config, rawMessages)
     purgeErrors(ctx.state, ctx.logger, ctx.config, rawMessages)
 
     return {
         rawMessages,
-        searchContext: buildSearchContext(ctx.state, rawMessages),
+        searchContext: buildSearchContext(ctx.state, rawMessages, pinnedMessageIds),
+        pinnedMessageIds,
         signal,
+    }
+}
+
+export async function assertPinnedMessagesUnchanged(
+    ctx: ToolContext,
+    toolCtx: RunContext,
+    prepared: PreparedSession,
+): Promise<void> {
+    const currentPinnedMessageIds = await runAbortable(
+        (requestSignal) =>
+            loadContextObligatoryMessageIds(ctx.client, toolCtx.sessionID, requestSignal),
+        prepared.signal,
+        "Revalidating pinned messages for compression",
+        COMPRESSION_API_TIMEOUT_MS,
+    ).catch((error) => failCompression(ctx, error))
+    ctx.sessionGuard?.assertActive()
+
+    if (!contextObligatoryMessageIdsEqual(prepared.pinnedMessageIds, currentPinnedMessageIds)) {
+        failCompression(
+            ctx,
+            new Error("Pinned messages changed during compression; retry with the current context."),
+        )
     }
 }
 

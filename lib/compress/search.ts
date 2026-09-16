@@ -18,7 +18,11 @@ export async function fetchSessionMessages(
     return filterMessages(response?.data || response)
 }
 
-export function buildSearchContext(state: SessionState, rawMessages: WithParts[]): SearchContext {
+export function buildSearchContext(
+    state: SessionState,
+    rawMessages: WithParts[],
+    pinnedMessageIds: ReadonlySet<string> = new Set(),
+): SearchContext {
     const rawMessagesById = new Map<string, WithParts>()
     const rawIndexById = new Map<string, number>()
     for (const msg of rawMessages) {
@@ -45,6 +49,7 @@ export function buildSearchContext(state: SessionState, rawMessages: WithParts[]
         rawMessagesById,
         rawIndexById,
         summaryByBlockId,
+        pinnedMessageIds,
     }
 }
 
@@ -136,6 +141,9 @@ export function resolveSelection(
         }
 
         const messageId = rawMessage.info.id
+        if (context.pinnedMessageIds.has(messageId)) {
+            continue
+        }
         if (!messageSeen.has(messageId)) {
             messageSeen.add(messageId)
             messageIds.push(messageId)
@@ -184,7 +192,7 @@ export function resolveSelection(
 
     if (messageIds.length === 0) {
         throw new Error(
-            "Failed to map boundary matches back to raw messages. Choose boundaries that include original conversation messages.",
+            "No compressible messages remain in this range. Pinned messages cannot be compressed.",
         )
     }
 

@@ -1,5 +1,5 @@
 import type { CompressionBlock, SessionState } from "../state"
-import { resolveAnchorMessageId, resolveBoundaryIds, resolveSelection } from "./search"
+import { resolveBoundaryIds, resolveSelection } from "./search"
 import type {
     BoundaryReference,
     CompressRangeToolArgs,
@@ -62,7 +62,7 @@ export function resolveRanges(
             index,
             entry: normalizedEntry,
             selection,
-            anchorMessageId: resolveAnchorMessageId(startReference),
+            anchorMessageId: selection.messageIds[0]!,
         }
     })
 }
