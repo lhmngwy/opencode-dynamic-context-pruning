@@ -63,6 +63,15 @@ export async function prepareSession(
     const signal = [toolCtx.abort, ctx.sessionGuard?.signal].filter(
         (entry): entry is AbortSignal => entry !== undefined,
     )
+    const pinnedMessageIds = await runAbortable(
+        (requestSignal) =>
+            loadContextObligatoryMessageIds(ctx.client, toolCtx.sessionID, requestSignal),
+        signal,
+        "Loading pinned messages for compression",
+        COMPRESSION_API_TIMEOUT_MS,
+    )
+    ctx.sessionGuard?.assertActive()
+
     await refreshManualMode(ctx.state, toolCtx.sessionID, ctx.logger, ctx.config.manualMode.enabled)
     ctx.sessionGuard?.assertActive()
 
@@ -133,15 +142,6 @@ export async function prepareSession(
 
     ctx.sessionGuard?.assertActive()
     assignMessageRefs(ctx.state, rawMessages)
-
-    const pinnedMessageIds = await runAbortable(
-        (requestSignal) =>
-            loadContextObligatoryMessageIds(ctx.client, toolCtx.sessionID, requestSignal),
-        signal,
-        "Loading pinned messages for compression",
-        COMPRESSION_API_TIMEOUT_MS,
-    ).catch((error) => failCompression(ctx, error))
-    ctx.sessionGuard?.assertActive()
 
     deduplicate(ctx.state, ctx.logger, ctx.config, rawMessages)
     purgeErrors(ctx.state, ctx.logger, ctx.config, rawMessages)

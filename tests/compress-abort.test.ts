@@ -21,6 +21,10 @@ test("prepareSession stops waiting for an explicitly requested permission when c
     const controller = new AbortController()
     const state = createSessionState()
     state.manualMode = "compress-pending"
+    let permissionStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+        permissionStarted = resolve
+    })
 
     const preparation = prepareSession(
         {
@@ -33,7 +37,10 @@ test("prepareSession stops waiting for an explicitly requested permission when c
             },
         } as any,
         {
-            ask: async () => new Promise<void>(() => {}),
+            ask: async () => {
+                permissionStarted()
+                return new Promise<void>(() => {})
+            },
             metadata: () => {},
             sessionID: "ses-cancelled-compression",
             abort: controller.signal,
@@ -42,6 +49,7 @@ test("prepareSession stops waiting for an explicitly requested permission when c
     )
 
     const rejection = assert.rejects(preparation, /Compression permission cancelled/)
+    await started
     controller.abort()
     await rejection
     assert.equal(state.manualMode, "active")
@@ -90,6 +98,7 @@ test("prepareSession passes cancellation to a stalled session message request", 
         {
             client: {
                 session: {
+                    get: async () => ({ data: {} }),
                     messages: async ({ signal }: { signal?: AbortSignal }) => {
                         requestSignal = signal
                         return new Promise<never>(() => {})
@@ -171,6 +180,7 @@ test("prepareSession fails safely when the runtime message snapshot is unavailab
             {
                 client: {
                     session: {
+                        get: async () => ({ data: {} }),
                         messages: async () => {
                             sessionFetches += 1
                             return new Promise<never>(() => {})
@@ -197,17 +207,24 @@ test("prepareSession fails safely when the runtime message snapshot is unavailab
     assert.equal(sessionFetches, 0)
 })
 
-test("cancelled session initialization does not leave partial state", async () => {
+test("cancelled pinned-message metadata loading leaves session state unchanged", async () => {
     const controller = new AbortController()
     const state = createSessionState()
     state.sessionId = "ses-existing"
+    state.manualMode = "compress-pending"
+    state.stats.totalPruneTokens = 42
+    const before = structuredClone(state)
+    let requestSignal: AbortSignal | undefined
 
     const preparation = prepareSession(
         {
             client: {
                 session: {
                     messages: async () => ({ data: [] }),
-                    get: async () => new Promise<never>(() => {}),
+                    get: async ({ signal }: { signal?: AbortSignal }) => {
+                        requestSignal = signal
+                        return new Promise<never>(() => {})
+                    },
                 },
             },
             state,
@@ -223,13 +240,17 @@ test("cancelled session initialization does not leave partial state", async () =
             sessionID: "ses-cancelled-initialization",
             abort: controller.signal,
         },
-        "Cancelled initialization",
+        "Cancelled metadata loading",
     )
 
-    const rejection = assert.rejects(preparation, /Initializing compression session cancelled/)
+    const rejection = assert.rejects(
+        preparation,
+        /Loading pinned messages for compression cancelled/,
+    )
     await new Promise((resolve) => setImmediate(resolve))
     controller.abort()
 
     await rejection
-    assert.equal(state.sessionId, "ses-existing")
+    assert.equal(requestSignal?.aborted, true)
+    assert.deepEqual(state, before)
 })

@@ -254,88 +254,109 @@ test("compress message mode batches individual message summaries", async () => {
     assert.match(blocks[1]?.summary || "", /task output body/)
 })
 
-test("compress message mode aborts before ID allocation when pins change", async () => {
-    const sessionID = `ses_message_pin_drift_${Date.now()}`
-    const rawMessages = buildMessages(sessionID)
-    const target = rawMessages.find((message) => message.info.id === "msg-assistant-1")
-    const targetText = target?.parts[0]
-    if (targetText?.type === "text") {
-        targetText.text = "Detailed implementation evidence. ".repeat(300)
-    }
+test("compress message mode aborts before commit when pins are added or removed", async () => {
+    for (const direction of ["added", "removed"] as const) {
+        const sessionID = `ses_message_pin_${direction}_${Date.now()}`
+        const rawMessages = buildMessages(sessionID)
+        const target = rawMessages.find((message) => message.info.id === "msg-assistant-1")
+        const targetText = target?.parts[0]
+        if (targetText?.type === "text") {
+            targetText.text = "Detailed implementation evidence. ".repeat(300)
+        }
 
-    const state = createSessionState()
-    let getCalls = 0
-    const tool = createCompressMessageTool({
-        client: {
-            session: {
-                messages: async () => ({ data: rawMessages }),
-                get: async () => {
-                    getCalls += 1
-                    return {
-                        data: {
-                            parentID: null,
-                            metadata:
-                                getCalls >= 3
+        const state = createSessionState()
+        const config = buildConfig()
+        config.pruneNotification = "minimal"
+        let getCalls = 0
+        let persistenceCalls = 0
+        let notificationCalls = 0
+        const tool = createCompressMessageTool({
+            client: {
+                tui: {
+                    showToast: async () => {
+                        notificationCalls += 1
+                    },
+                },
+                session: {
+                    messages: async () => ({ data: rawMessages }),
+                    prompt: async () => {
+                        notificationCalls += 1
+                    },
+                    get: async () => {
+                        getCalls += 1
+                        const isPinned = direction === "added" ? getCalls >= 3 : getCalls < 3
+                        return {
+                            data: {
+                                parentID: null,
+                                metadata: isPinned
                                     ? {
                                           openchamber: {
                                               context_obligatory_messages: [
                                                   {
-                                                      id: "msg-assistant-1",
-                                                      createdAt: 2,
-                                                      role: "assistant",
+                                                      id: "msg-user-1",
+                                                      createdAt: 1,
+                                                      role: "user",
                                                   },
                                               ],
                                           },
                                       }
                                     : {},
-                        },
-                    }
+                            },
+                        }
+                    },
                 },
             },
-        },
-        sessions: createSessionStateRegistry([[sessionID, state]]),
-        logger: new Logger(false),
-        config: buildConfig(),
-        prompts: {
-            reload() {},
-            getRuntimePrompts() {
-                return { compressMessage: "", compressRange: "" }
+            sessions: createSessionStateRegistry([[sessionID, state]]),
+            logger: new Logger(false),
+            config,
+            saveSessionState: async () => {
+                persistenceCalls += 1
             },
-        },
-    } as any)
+            prompts: {
+                reload() {},
+                getRuntimePrompts() {
+                    return { compressMessage: "", compressRange: "" }
+                },
+            },
+        } as any)
 
-    await assert.rejects(
-        tool.execute(
-            {
-                topic: "Stale pin snapshot",
-                content: [
-                    {
-                        messageId: "m0002",
-                        topic: "Implementation evidence",
-                        summary: "The implementation evidence was recorded.",
-                    },
-                ],
-            },
-            {
-                ask: async () => {},
-                metadata: () => {},
-                sessionID,
-                messageID: "msg-compress-pin-drift",
-            },
-        ),
-        /Pinned messages changed during compression/,
-    )
+        await assert.rejects(
+            tool.execute(
+                {
+                    topic: "Stale pin snapshot",
+                    content: [
+                        {
+                            messageId: "m0002",
+                            topic: "Implementation evidence",
+                            summary: "The implementation evidence was recorded.",
+                        },
+                    ],
+                },
+                {
+                    ask: async () => {},
+                    metadata: () => {},
+                    sessionID,
+                    messageID: `msg-compress-pin-${direction}`,
+                },
+            ),
+            /Pinned messages changed during compression/,
+        )
 
-    assert.equal(getCalls, 3)
-    assert.equal(state.prune.messages.blocksById.size, 0)
-    assert.equal(state.prune.messages.nextBlockId, 1)
-    assert.equal(state.prune.messages.nextRunId, 1)
+        assert.equal(getCalls, 3)
+        assert.equal(state.prune.messages.blocksById.size, 0)
+        assert.equal(state.prune.messages.nextBlockId, 1)
+        assert.equal(state.prune.messages.nextRunId, 1)
+        assert.equal(persistenceCalls, 0)
+        assert.equal(notificationCalls, 0)
+    }
 })
 
 test("compress message mode fails closed on a resolved metadata error during preparation", async () => {
     const sessionID = `ses_message_pin_initial_error_${Date.now()}`
     const rawMessages = buildMessages(sessionID)
     const state = createSessionState()
+    state.manualMode = "compress-pending"
+    const before = structuredClone(state)
     let getCalls = 0
     let persistenceCalls = 0
     let notificationCalls = 0
@@ -354,8 +375,8 @@ test("compress message mode fails closed on a resolved metadata error during pre
                 get: async () => {
                     getCalls += 1
                     return getCalls === 1
-                        ? { data: { parentID: null } }
-                        : { data: undefined, error: { status: 503 } }
+                        ? { data: undefined, error: { status: 503 } }
+                        : { data: { parentID: null } }
                 },
             },
         },
@@ -395,10 +416,8 @@ test("compress message mode fails closed on a resolved metadata error during pre
         /Unable to load pinned-message metadata/,
     )
 
-    assert.equal(getCalls, 2)
-    assert.equal(state.prune.messages.blocksById.size, 0)
-    assert.equal(state.prune.messages.nextBlockId, 1)
-    assert.equal(state.prune.messages.nextRunId, 1)
+    assert.equal(getCalls, 1)
+    assert.deepEqual(state, before)
     assert.equal(persistenceCalls, 0)
     assert.equal(notificationCalls, 0)
 })

@@ -357,7 +357,7 @@ test("compress range serializes concurrent calls for one session", async () => {
     assert.equal(sessions.peek(sessionID)?.prune.messages.nextBlockId, 3)
 })
 
-test("session deletion cancels active compression before state commit", async () => {
+test("session deletion cancels pinned-message metadata loading before state commit", async () => {
     const sessionID = `ses_deleted_compression_${Date.now()}`
     const rawMessages = buildMessages(sessionID)
     const sessions = createSessionStateRegistry()
@@ -382,12 +382,12 @@ test("session deletion cancels active compression before state commit", async ()
     const tool = createCompressRangeTool({
         client: {
             session: {
-                messages: async () => {
+                messages: async () => ({ data: rawMessages }),
+                get: async () => {
                     requestStarted()
                     await requestGate
-                    return { data: rawMessages }
+                    return { data: { parentID: "ses_parent" } }
                 },
-                get: async () => ({ data: { parentID: "ses_parent" } }),
             },
             tui: {
                 showToast: async () => {
@@ -455,7 +455,12 @@ test("session deletion aborts pending permission without waiting", async () => {
         releaseAsk = resolve
     })
     const tool = createCompressRangeTool({
-        client: { session: { messages: async () => ({ data: buildMessages(sessionID) }) } },
+        client: {
+            session: {
+                get: async () => ({ data: {} }),
+                messages: async () => ({ data: buildMessages(sessionID) }),
+            },
+        },
         sessions,
         logger: new Logger(false),
         config,
@@ -914,9 +919,9 @@ test("compress range mode rejects overlapping batched ranges", async () => {
     assert.equal(state.prune.messages.blocksById.size, 0)
 })
 
-test("compress range fails closed on resolved pin metadata errors before preparation or commit", async () => {
-    for (const failureBoundary of ["preparation", "revalidation"] as const) {
-        const sessionID = `ses_range_pin_${failureBoundary}_${Date.now()}`
+test("compress range aborts before commit when pins are added or removed", async () => {
+    for (const direction of ["added", "removed"] as const) {
+        const sessionID = `ses_range_pin_${direction}_${Date.now()}`
         const rawMessages = buildMessages(sessionID)
         const state = createSessionState()
         const config = buildConfig()
@@ -929,9 +934,105 @@ test("compress range fails closed on resolved pin metadata errors before prepara
             client: {
                 session: {
                     messages: async () => ({ data: rawMessages }),
+                    prompt: async () => {
+                        notifications += 1
+                    },
                     get: async () => {
                         getCalls += 1
-                        const errorCall = failureBoundary === "preparation" ? 2 : 3
+                        const isPinned = direction === "added" ? getCalls >= 3 : getCalls < 3
+                        return {
+                            data: {
+                                parentID: "ses_parent",
+                                metadata: isPinned
+                                    ? {
+                                          openchamber: {
+                                              context_obligatory_messages: [
+                                                  {
+                                                      id: "msg-subagent-prompt",
+                                                      createdAt: 1,
+                                                      role: "user",
+                                                  },
+                                              ],
+                                          },
+                                      }
+                                    : {},
+                            },
+                        }
+                    },
+                },
+                tui: {
+                    showToast: async () => {
+                        notifications += 1
+                    },
+                },
+            },
+            sessions: createSessionStateRegistry([[sessionID, state]]),
+            logger: new Logger(false),
+            config,
+            saveSessionState: async () => {
+                saves += 1
+            },
+            prompts: {
+                reload() {},
+                getRuntimePrompts() {
+                    return { compressRange: "", compressMessage: "" }
+                },
+            },
+        } as any)
+
+        await assert.rejects(
+            tool.execute(
+                {
+                    topic: "Stale pin snapshot",
+                    content: [
+                        {
+                            startId: "m0001",
+                            endId: "m0002",
+                            summary: "The implementation evidence was recorded.",
+                        },
+                    ],
+                },
+                {
+                    ask: async () => {},
+                    metadata: () => {},
+                    sessionID,
+                    messageID: `msg-compress-range-pin-${direction}`,
+                },
+            ),
+            /Pinned messages changed during compression/,
+        )
+
+        assert.equal(getCalls, 3)
+        assert.equal(state.prune.messages.blocksById.size, 0)
+        assert.equal(state.prune.messages.nextRunId, 1)
+        assert.equal(state.prune.messages.nextBlockId, 1)
+        assert.equal(saves, 0)
+        assert.equal(notifications, 0)
+    }
+})
+
+test("compress range fails closed on resolved pin metadata errors before preparation or commit", async () => {
+    for (const failureBoundary of ["preparation", "revalidation"] as const) {
+        const sessionID = `ses_range_pin_${failureBoundary}_${Date.now()}`
+        const rawMessages = buildMessages(sessionID)
+        const state = createSessionState()
+        if (failureBoundary === "preparation") {
+            state.manualMode = "compress-pending"
+        }
+        const before = structuredClone(state)
+        const config = buildConfig()
+        config.pruneNotification = "minimal"
+        config.pruneNotificationType = "toast"
+        let getCalls = 0
+        let saves = 0
+        let notifications = 0
+        const tool = createCompressRangeTool({
+            client: {
+                session: {
+                    messages: async () => ({ data: rawMessages }),
+                    get: async () => {
+                        getCalls += 1
+                        const errorCall = failureBoundary === "preparation" ? 1 : 3
                         return getCalls === errorCall
                             ? { data: undefined, error: { status: 503 } }
                             : { data: { parentID: "ses_parent", metadata: {} } }
@@ -979,10 +1080,14 @@ test("compress range fails closed on resolved pin metadata errors before prepara
             /Unable to load pinned-message metadata/,
         )
 
-        assert.equal(getCalls, failureBoundary === "preparation" ? 2 : 3)
-        assert.equal(state.prune.messages.blocksById.size, 0)
-        assert.equal(state.prune.messages.nextRunId, 1)
-        assert.equal(state.prune.messages.nextBlockId, 1)
+        assert.equal(getCalls, failureBoundary === "preparation" ? 1 : 3)
+        if (failureBoundary === "preparation") {
+            assert.deepEqual(state, before)
+        } else {
+            assert.equal(state.prune.messages.blocksById.size, 0)
+            assert.equal(state.prune.messages.nextRunId, 1)
+            assert.equal(state.prune.messages.nextBlockId, 1)
+        }
         assert.equal(saves, 0)
         assert.equal(notifications, 0)
     }
